@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default window capabilities: core events plus the open-folder dialog. No shell, fs, or http plugins are exposed to the webview.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:default"]
+}
