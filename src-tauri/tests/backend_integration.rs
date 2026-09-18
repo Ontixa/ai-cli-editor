@@ -88,6 +88,12 @@ fn pty_runs_command_streams_output_and_reports_exit() {
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(b64)
                         .unwrap_or_default();
+                    // ConPTY emits a DSR cursor-position query at startup and
+                    // stalls until the terminal answers (xterm.js does this in
+                    // production; the test must emulate it).
+                    if bytes.windows(4).any(|w| w == b"\x1b[6n") {
+                        reg.write(info.id, b"\x1b[1;1R").expect("dsr reply");
+                    }
                     if String::from_utf8_lossy(&bytes).contains("hello-pty") {
                         saw_output = true;
                     }

@@ -8,9 +8,14 @@ repository = "https://github.com/ai-cli-editor/ai-cli-editor"
 edition = "2021"
 rust-version = "1.77"
 
+# Desktop-first crate: "rlib" is what the app binary links; "staticlib"
+# keeps the iOS/mobile option open. "cdylib" is intentionally omitted — it
+# is only needed for Android, and on x86_64-pc-windows-gnu it fails to link
+# ("export ordinal too large"), which breaks `cargo test`/`cargo build` on
+# Windows machines using the GNU toolchain (no MSVC required).
 [lib]
 name = "ai_cli_editor_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
