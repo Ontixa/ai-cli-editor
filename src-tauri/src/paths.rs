@@ -163,6 +163,16 @@ pub fn rel_of(root: &Path, abs: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// Strip the Windows verbatim prefix (`\\?\` or its normalized `//?/`
+/// form) that `canonicalize()` produces. Git for Windows accepts `-C` with
+/// verbatim paths but fails when *creating* directories under them; tools
+/// and `PathBuf::from` both handle the stripped form.
+pub fn strip_verbatim(s: &str) -> &str {
+    s.strip_prefix("\\\\?\\")
+        .or_else(|| s.strip_prefix("//?/"))
+        .unwrap_or(s)
+}
+
 /// Display name for a workspace root (last path component).
 pub fn dir_name(path: &Path) -> String {
     path.file_name()

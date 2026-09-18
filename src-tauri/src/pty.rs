@@ -26,6 +26,9 @@ pub type PtyEmit = Arc<dyn Fn(u64, &str, serde_json::Value) + Send + Sync>;
 pub struct PtyInfo {
     pub id: u64,
     pub label: String,
+    /// OS pid of the spawned child — sessions use it as the process-tree
+    /// root for observation. May be null on platforms that don't report it.
+    pub pid: Option<u32>,
 }
 
 struct Session {
@@ -89,6 +92,7 @@ impl PtyRegistry {
             .spawn_command(cmd)
             .map_err(|e| AppError::Internal(format!("spawn failed: {e}")))?;
         drop(pair.slave); // releasing the slave lets EOF propagate on exit
+        let pid = child.process_id();
 
         let label = spec.label();
         let master = pair.master;
@@ -165,7 +169,7 @@ impl PtyRegistry {
             });
         }
 
-        Ok(PtyInfo { id, label })
+        Ok(PtyInfo { id, label, pid })
     }
 
     pub fn write(&self, id: u64, data: &[u8]) -> AppResult<()> {

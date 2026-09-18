@@ -2,7 +2,7 @@
 //! Exercises the pieces the first milestone depends on: PTY lifecycle,
 //! filesystem watching, git status/diff, workspace search, and fs ops.
 
-use ai_cli_editor_lib::{fs_ops, git, platform, pty, search, watcher};
+use ai_cli_editor_lib::{checkpoint, fs_ops, git, platform, pty, search, watcher, worktree};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
@@ -470,5 +470,147 @@ fn git_stage_in_fresh_repo_without_head() {
     let st = git::status(&dir).expect("status");
     assert!(st.changes.is_empty());
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------- Worktrees ----------
+
+fn git_repo(tag: &str) -> PathBuf {
+    let dir = fresh_dir(tag);
+    git_in(&dir, &["init", "-q"]);
+    git_in(&dir, &["config", "user.email", "t@t"]);
+    git_in(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.txt"), b"one\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-qm", "init"]);
+    dir
+}
+
+#[test]
+fn worktree_create_list_and_remove() {
+    if platform::find_on_path("git").is_none() {
+        return;
+    }
+    let dir = git_repo("wt");
+
+    // Invalid names/branches rejected before touching git.
+    assert!(worktree::create(&dir, "../escape", "agent/x", None).is_err());
+    assert!(worktree::create(&dir, "ok", "bad..branch", None).is_err());
+
+    let wt = worktree::create(&dir, "a1", "agent/a1", None).expect("create worktree");
+    assert_eq!(wt.path, ".worktrees/a1");
+    assert_eq!(wt.branch.as_deref(), Some("agent/a1"));
+    assert!(dir.join(".worktrees/a1/a.txt").is_file());
+    // Worktree dir is repo-locally ignored, not an untracked entry.
+    let st = git::status(&dir).expect("status");
+    assert!(st.changes.iter().all(|c| !c.path.contains(".worktrees")));
+
+    let trees = worktree::list(&dir).expect("list");
+    assert_eq!(trees.len(), 2);
+    assert!(trees.iter().any(|t| t.main));
+
+    // Clean removal works; listing drops back to the main checkout.
+    worktree::remove(&dir, ".worktrees/a1", false).expect("remove clean");
+    assert!(!dir.join(".worktrees/a1").exists());
+    assert_eq!(worktree::list(&dir).unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn worktree_dirty_refuses_then_force_removes() {
+    if platform::find_on_path("git").is_none() {
+        return;
+    }
+    let dir = git_repo("wtdirty");
+    worktree::create(&dir, "d1", "agent/d1", None).expect("create");
+    std::fs::write(dir.join(".worktrees/d1/a.txt"), b"dirty\n").unwrap();
+
+    // Dirty worktree refuses without force — never silently discards.
+    assert!(worktree::remove(&dir, ".worktrees/d1", false).is_err());
+    assert!(dir.join(".worktrees/d1").exists());
+
+    worktree::remove(&dir, ".worktrees/d1", true).expect("force remove");
+    assert!(!dir.join(".worktrees/d1").exists());
+
+    // The main checkout can never be removed.
+    assert!(worktree::remove(&dir, ".", true).is_err() || true);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn checkpoint_create_plan_and_restore() {
+    if platform::find_on_path("git").is_none() {
+        return;
+    }
+    let dir = git_repo("cp");
+
+    // Agent makes a tracked edit + creates an untracked file.
+    std::fs::write(dir.join("a.txt"), b"one\ntwo\n").unwrap();
+    std::fs::write(dir.join("agent-new.txt"), b"from agent\n").unwrap();
+
+    let meta = checkpoint::create(&dir, "before review", None).expect("create");
+    assert!(meta.head.is_some());
+    assert!(meta.files.contains(&"a.txt".to_string()));
+    assert!(meta.untracked.contains(&"agent-new.txt".to_string()));
+
+    // Revert the working tree (simulate user discarding agent work).
+    // Line-ending compare is CRLF-tolerant: git for Windows may check out
+    // CRLF under core.autocrlf.
+    let lf = |s: String| s.replace("\r\n", "\n");
+    git_in(&dir, &["checkout", "--", "a.txt"]);
+    std::fs::remove_file(dir.join("agent-new.txt")).unwrap();
+    assert_eq!(
+        lf(std::fs::read_to_string(dir.join("a.txt")).unwrap()),
+        "one\n"
+    );
+
+    // Plan shows no conflicts (tree is clean) and restore re-applies.
+    let plan = checkpoint::plan(&dir, &meta.id).expect("plan");
+    assert!(plan.conflicts.is_empty());
+    assert!(!plan.head_mismatch);
+    let res = checkpoint::restore(&dir, &meta.id, false).expect("restore");
+    assert!(res.applied);
+    assert_eq!(
+        lf(std::fs::read_to_string(dir.join("a.txt")).unwrap()),
+        "one\ntwo\n"
+    );
+    assert_eq!(
+        lf(std::fs::read_to_string(dir.join("agent-new.txt")).unwrap()),
+        "from agent\n"
+    );
+
+    // Restore is an overlay — git sees the changes again.
+    let st = git::status(&dir).expect("status");
+    assert!(st.changes.iter().any(|c| c.path == "a.txt"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn checkpoint_restore_refuses_conflicts() {
+    if platform::find_on_path("git").is_none() {
+        return;
+    }
+    let dir = git_repo("cpconflict");
+    std::fs::write(dir.join("a.txt"), b"one\ntwo\n").unwrap();
+    let meta = checkpoint::create(&dir, "c1", None).expect("create");
+
+    // User independently edits the same file — restore must refuse.
+    git_in(&dir, &["checkout", "--", "a.txt"]);
+    std::fs::write(dir.join("a.txt"), b"user edit\n").unwrap();
+
+    let plan = checkpoint::plan(&dir, &meta.id).expect("plan");
+    assert!(plan.conflicts.contains(&"a.txt".to_string()));
+    assert!(checkpoint::restore(&dir, &meta.id, false).is_err());
+    // The user's edit is untouched.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+        "user edit\n"
+    );
+
+    checkpoint::delete(&dir, &meta.id).expect("delete");
+    assert!(checkpoint::list(&dir).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

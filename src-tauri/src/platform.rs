@@ -28,10 +28,72 @@ pub struct AgentInfo {
 const KNOWN_AGENTS: &[(&str, &str)] = &[
     ("codex", "Codex CLI"),
     ("claude", "Claude Code"),
+    ("devin", "Devin CLI"),
     ("gemini", "Gemini CLI"),
     ("opencode", "OpenCode"),
     ("aider", "Aider"),
 ];
+
+/// Map a spawned program to a known agent id. Matches the executable
+/// basename (case-insensitive, common shim extensions stripped) so that
+/// e.g. `C:\...\codex.cmd` and `codex` both detect as "codex".
+/// Returns "shell" for interactive shells and "terminal" for anything else.
+pub fn agent_kind(program: &str) -> &'static str {
+    let base = Path::new(program)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| program.to_lowercase());
+    let stem = base
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".bat")
+        .trim_end_matches(".ps1")
+        .to_string();
+    match stem.as_str() {
+        "codex" => "codex",
+        "claude" => "claude",
+        "devin" => "devin",
+        "gemini" => "gemini",
+        "opencode" => "opencode",
+        "aider" => "aider",
+        "pwsh" | "powershell" | "cmd" | "sh" | "bash" | "zsh" | "fish" | "nu" => "shell",
+        _ => "terminal",
+    }
+}
+
+/// Best-effort exit code for a process we (transitively) spawned.
+/// Only meaningful on Windows — there is no portable way to read another
+/// process's exit status on Unix once it has exited. Returns `None` when
+/// the code can't be obtained; callers must treat that as "unknown".
+pub fn process_exit_code(pid: u32) -> Option<i64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            if ok != 0 && code != 259
+            /* STILL_ACTIVE */
+            {
+                return Some(code as i64);
+            }
+        }
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        None
+    }
+}
 
 /// Candidate executable file names for `name` on this platform.
 /// On Windows, PATHEXT drives the extensions tried.

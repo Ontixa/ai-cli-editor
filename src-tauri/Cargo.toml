@@ -1,6 +1,6 @@
 [package]
 name = "ai-cli-editor"
-version = "0.1.0"
+version = "0.2.0"
 description = "The lightweight editor for Codex, Claude Code, Gemini CLI and coding agents."
 authors = ["AI CLI Editor contributors"]
 license = "Apache-2.0"
@@ -31,6 +31,13 @@ portable-pty = "0.9"
 ignore = "0.4"
 base64 = "0.22"
 similar = "2"
+sysinfo = "0.33"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
 
 [profile.dev]
 incremental = true

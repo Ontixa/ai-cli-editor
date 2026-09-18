@@ -37,7 +37,7 @@ const IGNORED_DIRS: &[&str] = &[
     ".vscode",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ChangeKind {
     Created,
