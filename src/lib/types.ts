@@ -57,6 +57,128 @@ export interface SearchMatch {
 export interface PtyInfo {
   id: number;
   label: string;
+  pid?: number | null;
+}
+
+// ---------- agent sessions (v0.2) ----------
+
+export type SessionState = "starting" | "busy" | "idle" | "exited" | "stale";
+export type Attribution = "direct" | "likely" | "ambiguous";
+
+export interface FileTouch {
+  path: string;
+  kind: ChangeKind;
+  count: number;
+  lastAt: number;
+  attribution: Attribution;
+}
+
+export interface CommandRun {
+  pid: number;
+  name: string;
+  cmd: string;
+  kind: "test" | "build" | "tool" | "agent" | "other" | string;
+  startedAt: number;
+  endedAt?: number | null;
+  exitCode?: number | null;
+  running: boolean;
+}
+
+export interface ChildProc {
+  pid: number;
+  name: string;
+}
+
+export interface SessionGit {
+  branch?: string | null;
+  dirty: number;
+  staged: number;
+}
+
+export interface AgentSession {
+  id: string;
+  ptyId?: number | null;
+  label: string;
+  agent: string;
+  agentSource: "spawn" | "process-tree" | string;
+  program?: string | null;
+  pid?: number | null;
+  root: string;
+  relPrefix: string;
+  state: SessionState;
+  live: boolean;
+  startedAt: number;
+  lastActivityAt: number;
+  endedAt?: number | null;
+  exitCode?: number | null;
+  touchedCount: number;
+  recentFiles: FileTouch[];
+  commands: CommandRun[];
+  children: ChildProc[];
+  git?: SessionGit | null;
+}
+
+export interface Collision {
+  kind: "workspace" | "file" | string;
+  path?: string | null;
+  sessionIds: string[];
+  detail: string;
+}
+
+export interface SessionsEvent {
+  sessions: AgentSession[];
+  collisions: Collision[];
+}
+
+// ---------- worktrees ----------
+
+export interface WorktreeInfo {
+  path: string;
+  absPath: string;
+  branch?: string | null;
+  head?: string | null;
+  detached: boolean;
+  main: boolean;
+  missing: boolean;
+  dirty: boolean;
+}
+
+// ---------- checkpoints ----------
+
+export interface CheckpointMeta {
+  id: string;
+  label: string;
+  createdAt: number;
+  sessionId?: string | null;
+  repo: string;
+  branch?: string | null;
+  head?: string | null;
+  files: string[];
+  untracked: string[];
+  skipped: string[];
+}
+
+export interface RestorePlan {
+  id: string;
+  files: string[];
+  conflicts: string[];
+  headMismatch: boolean;
+  repoMissing: boolean;
+}
+
+export interface RestoreResult {
+  applied: boolean;
+  restoredFiles: number;
+  warnings: string[];
+}
+
+// ---------- review ----------
+
+export interface ReviewedFile {
+  path: string;
+  category: string;
+  reasons: string[];
+  rank: number;
 }
 
 export interface AgentInfo {

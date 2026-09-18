@@ -6,11 +6,19 @@
 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { store, type AppState, type Tab } from "./app";
-import { api, onFsBatch, onGitStale, onSearchChunk, onSearchDone, inTauri } from "../lib/ipc";
+import {
+  api,
+  onFsBatch,
+  onGitStale,
+  onSearchChunk,
+  onSearchDone,
+  onSessionUpdate,
+  inTauri,
+} from "../lib/ipc";
 import { editorManager } from "../lib/editor-manager";
 import { ingestChanges, pushNotice } from "../lib/activity";
 import { isSourcePath } from "../lib/lang";
-import type { FsChange } from "../lib/types";
+import type { AgentSession, FsChange, RestorePlan } from "../lib/types";
 
 const fileKey = (path: string) => `file:${path}`;
 const diffKey = (path: string, staged: boolean) => `diff:${path}:${staged ? "staged" : "wt"}`;
@@ -117,11 +125,18 @@ export async function openWorkspacePath(path: string) {
     activity: [],
     terminals: [],
     activeTerminal: null,
+    sessions: [],
+    collisions: [],
+    worktrees: [],
+    checkpoints: [],
+    review: {},
     fileIndex: null,
     search: { id: 0, query: "", matches: [], running: false, truncated: false },
     recentFiles: store.get().recentFiles,
   });
   void refreshGit();
+  void refreshWorktrees();
+  void refreshCheckpoints();
   schedulePersist();
 }
 
@@ -413,8 +428,27 @@ export async function refreshGit() {
   try {
     const git = await api.gitStatus();
     store.set({ git });
+    void refreshReview(git.changes.length);
   } catch {
     /* not a repo or git missing */
+  }
+}
+
+/** Re-classify changed files. Skipped for very large changesets where
+ *  fetching every patch would be wasteful — badges just stay stale. */
+async function refreshReview(changeCount: number) {
+  if (changeCount === 0) {
+    if (Object.keys(store.get().review).length) store.set({ review: {} });
+    return;
+  }
+  if (changeCount > 150) return;
+  try {
+    const files = await api.reviewSummaries();
+    const review: Record<string, (typeof files)[number]> = {};
+    for (const f of files) review[f.path] = f;
+    store.set({ review });
+  } catch {
+    /* review is advisory — never block git refresh */
   }
 }
 
@@ -462,7 +496,13 @@ export function openDiff(path: string, staged: boolean, untracked: boolean) {
 
 // ---------- terminals ----------
 
-export function newTerminal(launch?: { program: string; args?: string[]; label?: string }) {
+export function newTerminal(launch?: {
+  program?: string;
+  args?: string[];
+  label?: string;
+  /** Workspace-relative cwd — set for worktree sessions. */
+  cwd?: string;
+}) {
   const s = store.get();
   const seq = s.terminalSeq + 1;
   const label = launch?.label ?? launch?.program ?? `${s.shellLabel}`;
@@ -472,6 +512,7 @@ export function newTerminal(launch?: { program: string; args?: string[]; label?:
     exited: false,
     program: launch?.program,
     args: launch?.args,
+    cwd: launch?.cwd,
   };
   store.set({
     terminals: [...s.terminals, session],
@@ -583,6 +624,149 @@ export function cancelSearch() {
   store.set({ search: { ...store.get().search, running: false } });
 }
 
+// ---------- agent sessions ----------
+
+function applySessions(ev: { sessions: AgentSession[]; collisions: AppState["collisions"] }) {
+  store.set({ sessions: ev.sessions, collisions: ev.collisions });
+}
+
+/** Focus a session's terminal (spawns a view if the tab was closed). */
+export function focusSession(session: AgentSession) {
+  const s = store.get();
+  if (session.ptyId != null) {
+    const term = s.terminals.find((t) => t.ptyId === session.ptyId);
+    if (term) {
+      store.set({ activeTerminal: term.seq, terminalVisible: true });
+      markUserAction();
+      return;
+    }
+  }
+  // No live terminal tab for this session — just show the panel.
+  store.set({ terminalVisible: true });
+}
+
+export async function renameSession(id: string, label: string) {
+  try {
+    await api.sessionRename(id, label);
+  } catch {
+    /* session may be gone */
+  }
+}
+
+export async function stopSession(id: string) {
+  try {
+    await api.sessionStop(id);
+  } catch {
+    /* already exited */
+  }
+}
+
+// ---------- worktrees ----------
+
+export async function refreshWorktrees() {
+  if (!store.get().workspace) return;
+  try {
+    const worktrees = await api.worktreeList();
+    store.set({ worktrees });
+  } catch {
+    store.set({ worktrees: [] });
+  }
+}
+
+/** Create an isolated worktree + open a terminal (optionally an agent) in it. */
+export async function createAgentWorktree(
+  name: string,
+  branch: string | undefined,
+  agent?: { id: string; name: string; path?: string | null },
+): Promise<string | null> {
+  try {
+    const wt = await api.worktreeCreate(name, branch);
+    await refreshWorktrees();
+    newTerminal({
+      cwd: wt.path,
+      program: agent ? (agent.path ?? agent.id) : undefined,
+      label: agent ? `${agent.name} · ${name}` : name,
+    });
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+/** Open a terminal (or agent) inside an existing worktree. */
+export function openWorktreeTerminal(
+  wtPath: string,
+  agent?: { id: string; name: string; path?: string | null },
+) {
+  newTerminal({
+    cwd: wtPath,
+    program: agent ? (agent.path ?? agent.id) : undefined,
+    label: agent ? agent.name : baseName(wtPath),
+  });
+}
+
+/** Returns an error string, or null on success. `force` discards dirty state. */
+export async function removeWorktree(path: string, force: boolean): Promise<string | null> {
+  try {
+    await api.worktreeRemove(path, force);
+    await refreshWorktrees();
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+// ---------- checkpoints ----------
+
+export async function refreshCheckpoints() {
+  if (!store.get().workspace) return;
+  try {
+    const checkpoints = await api.checkpointList();
+    store.set({ checkpoints });
+  } catch {
+    store.set({ checkpoints: [] });
+  }
+}
+
+export async function createCheckpoint(label?: string, sessionId?: string): Promise<string | null> {
+  try {
+    await api.checkpointCreate(label, sessionId);
+    await refreshCheckpoints();
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+export async function checkpointPlan(id: string): Promise<RestorePlan | null> {
+  try {
+    return await api.checkpointPlan(id);
+  } catch {
+    return null;
+  }
+}
+
+/** Returns warnings/errors as a string, or null on clean restore. */
+export async function restoreCheckpoint(id: string, force: boolean): Promise<string | null> {
+  try {
+    const res = await api.checkpointRestore(id, force);
+    await refreshCheckpoints();
+    void refreshGit();
+    return res.warnings.length ? res.warnings.join("; ") : null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+export async function deleteCheckpoint(id: string) {
+  try {
+    await api.checkpointDelete(id);
+  } catch {
+    /* already gone */
+  }
+  await refreshCheckpoints();
+}
+
 // ---------- backend event wiring (call once) ----------
 
 let wired = false;
@@ -603,6 +787,12 @@ export function setupBackendListeners() {
     if (done.id !== s.search.id) return;
     store.set({ search: { ...s.search, running: false, truncated: done.truncated } });
   });
+  void onSessionUpdate(applySessions);
+  // Initial fetch in case the workspace was opened before wiring ran.
+  void api
+    .sessionList()
+    .then(applySessions)
+    .catch(() => {});
   // Persist relevant state changes (throttled inside schedulePersist).
   store.subscribe(schedulePersist);
 }

@@ -107,6 +107,7 @@ export function TerminalView({ session, visible }: Props) {
           program: session.program,
           args: session.args,
           label: session.label,
+          cwd: session.cwd,
           cols: dims?.cols ?? 80,
           rows: dims?.rows ?? 24,
         });

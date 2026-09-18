@@ -1,8 +1,18 @@
 import { Store } from "../lib/store";
 import type { ActivityItem } from "../lib/activity";
-import type { AgentInfo, GitStatus, SearchMatch, WorkspaceInfo } from "../lib/types";
+import type {
+  AgentInfo,
+  AgentSession,
+  CheckpointMeta,
+  Collision,
+  GitStatus,
+  ReviewedFile,
+  SearchMatch,
+  WorktreeInfo,
+  WorkspaceInfo,
+} from "../lib/types";
 
-export type SidebarTab = "files" | "changes" | "activity" | "search";
+export type SidebarTab = "files" | "changes" | "activity" | "search" | "agents";
 export type TabKind = "file" | "diff";
 export type DiffMode = "unified" | "split";
 export type Theme = "dark" | "light";
@@ -39,6 +49,8 @@ export interface TerminalSession {
   /** Pending launch spec for command sessions (e.g. `codex`). */
   program?: string;
   args?: string[];
+  /** Workspace-relative working dir — set for worktree sessions. */
+  cwd?: string;
 }
 
 export interface SearchUiState {
@@ -96,6 +108,17 @@ export interface AppState {
   agents: AgentInfo[];
   shellLabel: string;
 
+  /** Agent sessions (live + stale history) from the backend registry. */
+  sessions: AgentSession[];
+  /** Operational collision warnings derived from session activity. */
+  collisions: Collision[];
+  /** Git worktrees under `.worktrees/` for agent isolation. */
+  worktrees: WorktreeInfo[];
+  /** Checkpoints stored in the repo's git dir. */
+  checkpoints: CheckpointMeta[];
+  /** Deterministic review classification keyed by path. */
+  review: Record<string, ReviewedFile>;
+
   fileIndex: string[] | null;
   fileIndexTruncated: boolean;
 
@@ -139,6 +162,11 @@ export const initialState: AppState = {
   terminalSeq: 0,
   agents: [],
   shellLabel: "terminal",
+  sessions: [],
+  collisions: [],
+  worktrees: [],
+  checkpoints: [],
+  review: {},
   fileIndex: null,
   fileIndexTruncated: false,
   quickOpen: false,

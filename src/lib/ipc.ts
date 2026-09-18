@@ -2,16 +2,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentInfo,
+  CheckpointMeta,
   DirEntry,
   FileData,
   FileList,
+  FileTouch,
   FsChange,
   GitStatus,
   LinkTarget,
   PtyInfo,
+  RestorePlan,
+  RestoreResult,
+  ReviewedFile,
   SearchChunk,
   SearchDone,
+  SessionsEvent,
   ShellSpec,
+  WorktreeInfo,
   WorkspaceInfo,
 } from "./types";
 
@@ -55,6 +62,7 @@ export const api = {
     program?: string;
     args?: string[];
     label?: string;
+    cwd?: string;
     cols: number;
     rows: number;
   }) => invoke<PtyInfo>("pty_spawn", { args }),
@@ -63,6 +71,31 @@ export const api = {
   ptyResize: (id: number, cols: number, rows: number) =>
     invoke<void>("pty_resize", { id, cols, rows }),
   ptyKill: (id: number) => invoke<void>("pty_kill", { id }),
+  sessionList: () => invoke<SessionsEvent>("session_list"),
+  sessionRename: (id: string, label: string) => invoke<void>("session_rename", { id, label }),
+  sessionStop: (id: string) => invoke<void>("session_stop", { id }),
+  sessionFiles: (id: string) => invoke<FileTouch[]>("session_files", { id }),
+  worktreeList: () => invoke<WorktreeInfo[]>("worktree_list"),
+  worktreeCreate: (name: string, branch?: string, base?: string) =>
+    invoke<WorktreeInfo>("worktree_create", {
+      name,
+      branch: branch ?? null,
+      base: base ?? null,
+    }),
+  worktreeRemove: (path: string, force: boolean) =>
+    invoke<void>("worktree_remove", { path, force }),
+  worktreePrune: () => invoke<void>("worktree_prune"),
+  checkpointCreate: (label?: string, sessionId?: string) =>
+    invoke<CheckpointMeta>("checkpoint_create", {
+      label: label ?? null,
+      sessionId: sessionId ?? null,
+    }),
+  checkpointList: () => invoke<CheckpointMeta[]>("checkpoint_list"),
+  checkpointPlan: (id: string) => invoke<RestorePlan>("checkpoint_plan", { id }),
+  checkpointRestore: (id: string, force: boolean) =>
+    invoke<RestoreResult>("checkpoint_restore", { id, force }),
+  checkpointDelete: (id: string) => invoke<void>("checkpoint_delete", { id }),
+  reviewSummaries: () => invoke<ReviewedFile[]>("review_summaries"),
   detectAgents: () => invoke<AgentInfo[]>("detect_agents"),
   defaultShell: () => invoke<ShellSpec>("default_shell"),
   loadState: () => invoke<Record<string, unknown> | null>("load_state"),
@@ -93,6 +126,10 @@ export function onSearchChunk(cb: (chunk: SearchChunk) => void): Promise<Unliste
 
 export function onSearchDone(cb: (done: SearchDone) => void): Promise<UnlistenFn> {
   return listen<SearchDone>("search:done", (e) => cb(e.payload));
+}
+
+export function onSessionUpdate(cb: (ev: SessionsEvent) => void): Promise<UnlistenFn> {
+  return listen<SessionsEvent>("session:update", (e) => cb(e.payload));
 }
 
 export function b64decode(b64: string): Uint8Array {
