@@ -1,26 +1,44 @@
 # Project Roadmap
 
-## v0.1 — first milestone (this release)
+## v0.1 — first milestone (shipped)
 
 - Open a local folder; lazy file tree with git badges
 - CodeMirror viewer/editor tabs; `Ctrl+P` quick open; `Ctrl+Shift+F` search
 - Real PTY terminals (shells + detected agent CLIs), clickable file links
 - Live fs watching → explorer/docs/activity/git all update
 - Agent Activity timeline; Follow Agent mode
-- Git Changes + unified diff
-- Workspace persistence
+- Git Changes + unified/split diff, stage/commit box, explorer file ops
+- Light + dark themes; workspace persistence
+
+## v0.2 — Agent Workspace (this release)
+
+- **Agent Sessions** — every PTY becomes an observable session: agent kind,
+  PID, worktree root, lifecycle state, touched files, command runs, git
+  summary (`session.rs`, `pty_spawn` cwd support)
+- **Agents cockpit** — session cards, collision banner, history; focus /
+  rename / checkpoint / stop actions
+- **Process observation** — descendant-only monitor, bounded depth/children,
+  command classification, exit codes where obtainable (`procmon.rs`)
+- **File attribution** — watcher → session touches (direct/likely/ambiguous)
+  - same-file / shared-tree collision warnings
+- **Git worktrees** — `.worktrees/<name>` on `agent/<name>` branches, dirty
+  protection, prune (`worktree.rs`)
+- **Checkpoints** — Git-native patch snapshots + previewed, conflict-aware
+  restore (`checkpoint.rs`)
+- **Review queue** — deterministic classification with reasons + risk filter
+  in Changes (`review.rs`)
+- **Persistence v2** — `sessions.json` history across restarts; dead
+  processes stay dead
+- Windows test toolchain fixes (manifest linking, ConPTY DSR in tests)
 
 ## Next
 
-- Side-by-side diff mode
 - Configurable ignored directories / watch excludes
-- Persistent activity history (session resume)
 - Bundled/embedded ripgrep for Windows installs without it
-- Light theme + theme architecture
-- Staged-diff polish, commit shortcut (normal `git commit` in terminal works
-  today — a small commit box is a maybe)
-- File ops in explorer (new file/rename/delete) — deliberately deferred to
-  keep the tree a viewer first
+- Session templates / one-click "new isolated agent" presets
+- Merge-readiness summary across agent worktrees
+- Session export (bounded metadata receipt)
+- Resource usage display in the cockpit
 
 ## Explicit non-goals
 

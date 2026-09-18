@@ -1,9 +1,12 @@
 # AI CLI Editor
 
-**The lightweight editor for Codex, Claude Code, Gemini CLI and coding agents.**
+**The control plane, cockpit, and review surface for terminal-native coding agents.**
 
-AI CLI Editor is a terminal-first code editor for people who let coding agents
-write the code and mainly need to **view, review, diff, and steer** them.
+AI CLI Editor is a terminal-first workspace for people who let coding agents
+write the code and mainly need to **launch, observe, isolate, review, and
+steer** them. A terminal running `codex`, `claude`, `devin`, `gemini`,
+`opencode`, `aider`, or any other CLI is a first-class **Agent Session** —
+not just a terminal.
 
 AI writes code. Humans steer, observe, inspect, review, occasionally edit,
 test, and commit.
@@ -38,11 +41,42 @@ tree, a real diff — and stays fast and stable through long agent sessions.
 
 ## Features
 
+- **Agent Sessions** — every spawned terminal becomes an observable session:
+  detected agent kind, PID, working directory/worktree, lifecycle state
+  (starting → busy/idle → exited), elapsed time, touched files, child
+  processes, command runs (test/build/tool) with exit codes where the OS
+  reports them, and a live Git summary.
+- **Agents cockpit** — a compact sidebar panel listing all live sessions and
+  recent history: state dot, agent kind, worktree, files touched, running
+  commands, exit codes. Focus, rename, checkpoint, or stop a session
+  in place.
+- **Git worktree isolation** — one click creates `.worktrees/<name>` on
+  branch `agent/<name>` and opens a terminal (or agent) inside it. Dirty
+  worktrees refuse removal unless you explicitly confirm; `worktree prune`
+  cleans stale metadata.
+- **Collision detection** — bounded, honest warnings when two live sessions
+  touch the same file or share the same working tree. Advisory, not merge
+  prediction; worktree-isolated agents generate few alerts.
+- **Deterministic review classification** — every changed file is tagged by
+  local heuristics (no AI): `security`, `db-migration`, `ci-config`,
+  `dependencies`, `tests`, `generated`, `docs`, `binary`. Badges in Changes,
+  a "review N" filter for elevated-risk files, and human-readable reasons.
+- **Checkpoints** — Git-native snapshots of a session's (or the workspace's)
+  working tree: patch + untracked files + metadata stored under `.git/`.
+  Restore is an explicit, previewed overlay — conflicting files are listed
+  first and require a forced restore; nothing is silently discarded.
+- **Process observation** — a conservative monitor follows only descendants
+  of app-spawned PTYs (depth- and count-bounded), so `vitest`, `cargo`,
+  `pytest`, `tsc` runs show up against the session that launched them.
+- **Session history** — bounded session metadata persists across restarts in
+  `sessions.json`; dead processes are shown as history, never resurrected.
 - **Real PTY terminals** — multiple sessions, PowerShell/cmd on Windows,
-  bash/zsh on macOS/Linux. Runs `codex`, `claude`, `gemini`, `opencode`,
-  `aider`, and any other CLI. Detected agents get one-click launch buttons.
+  bash/zsh on macOS/Linux. Runs `codex`, `claude`, `devin`, `gemini`,
+  `opencode`, `aider`, and any other CLI. Detected agents get one-click
+  launch buttons.
 - **Live file watching** — creations, edits, deletes and renames land in the
-  tree, the Changes panel, and Agent Activity the moment they happen.
+  tree, the Changes panel, Agent Activity, and session attribution the
+  moment they happen.
 - **Agent Activity** — a session timeline of what the agent touched:
   `23:31:02  M  src/auth.ts`, grouped when edits repeat.
 - **Follow Agent** — optionally surfaces the file the agent is currently
@@ -114,9 +148,10 @@ Shortcuts pass through to the shell while the terminal has focus (so
 
 ## Supported coding CLIs
 
-Anything that runs in a terminal. Detected automatically for quick-launch:
-Codex CLI, Claude Code, Gemini CLI, OpenCode, Aider. Absence of any of them
-is fine — a plain shell is always available.
+Anything that runs in a terminal. Detected automatically for quick-launch
+and session labeling: Codex CLI, Claude Code, Devin CLI, Gemini CLI,
+OpenCode, Aider. Unknown programs get generic session tracking — absence of
+any of them is fine, a plain shell is always available.
 
 ## Architecture
 
@@ -125,14 +160,33 @@ React + TS frontend            Rust backend (Tauri 2)
 ─────────────────────          ──────────────────────────────────
 editor · explorer ·            fs ops (root-containment checked)
 terminal · diff · activity     watcher (notify + debounced merge)
-command registry · fuzzy       PTY registry (portable-pty)
-quick-open · search            git via git binary (porcelain v2)
+agents cockpit · review        PTY registry (portable-pty)
+command registry · fuzzy       session registry + attribution
+quick-open · search            proc monitor (sysinfo, descendants only)
+                               worktrees + checkpoints (git binary)
+                               review classifier (deterministic)
+                               git via git binary (porcelain v2)
                                search via rg --null streaming
-                               JSON workspace persistence
+                               JSON workspace + session persistence
 ```
 
 Events are typed contracts (`fs:batch`, `pty:out:<id>`, `search:chunk`,
-`search:done`, `git:stale`) — see `docs/system-architecture.md`.
+`search:done`, `git:stale`, `session:update`) — see
+`docs/system-architecture.md`.
+
+## Limitations
+
+- **File attribution is best-effort.** Two agents in the same directory make
+  per-file attribution ambiguous; the UI says so instead of guessing.
+- **Process observation is best-effort.** Only descendants of app-spawned
+  PTYs are watched; exit codes depend on what the OS reports. Windows is the
+  primary target; Linux/macOS use the same abstractions.
+- **Collision detection is advisory.** It flags shared files/trees; it does
+  not predict merge conflicts.
+- **Checkpoints are not commits.** They overlay a saved patch onto the
+  working tree on restore and require Git. They never rewrite history.
+- **Test/build output is not parsed.** Command kinds and exit codes come
+  from the process tree, not from scraping agent output.
 
 ## Privacy
 
@@ -143,10 +197,11 @@ workspace root.
 
 ## Roadmap
 
-Near-term: configurable ignore lists, persistent activity history, bundled
-ripgrep, more themes. Explicit non-goals live in
-`docs/project-roadmap.md` — LSP, extensions, and AI APIs are out of scope
-by design.
+v0.2 "Agent Workspace" delivers sessions, the cockpit, worktrees, collision
+detection, review classification, and checkpoints. Near-term: configurable
+ignore lists, bundled ripgrep, session templates, merge-readiness summaries.
+Explicit non-goals live in `docs/project-roadmap.md` — LSP, extensions,
+embedded AI chat, and AI APIs are out of scope by design.
 
 ## Contributing
 
