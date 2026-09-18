@@ -1,7 +1,7 @@
 [package]
 name = "ai-cli-editor"
 version = "0.2.0"
-description = "The lightweight editor for Codex, Claude Code, Gemini CLI and coding agents."
+description = "The control plane, cockpit, and review surface for terminal-native coding agents."
 authors = ["AI CLI Editor contributors"]
 license = "Apache-2.0"
 repository = "https://github.com/ai-cli-editor/ai-cli-editor"
