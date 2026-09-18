@@ -4,6 +4,8 @@ import type { AgentInfo, GitStatus, SearchMatch, WorkspaceInfo } from "../lib/ty
 
 export type SidebarTab = "files" | "changes" | "activity" | "search";
 export type TabKind = "file" | "diff";
+export type DiffMode = "unified" | "split";
+export type Theme = "dark" | "light";
 
 export interface Tab {
   /** Stable key: `file:<path>` or `diff:<path>:<staged>` */
@@ -82,6 +84,11 @@ export interface AppState {
   git: GitStatus;
   activity: ActivityItem[];
 
+  /** Diff tabs render unified or side-by-side. */
+  diffMode: DiffMode;
+  /** UI theme; applied to documentElement as data-theme. */
+  theme: Theme;
+
   terminals: TerminalSession[];
   activeTerminal: number | null;
   terminalSeq: number;
@@ -125,6 +132,8 @@ export const initialState: AppState = {
   cursor: null,
   git: EMPTY_GIT,
   activity: [],
+  diffMode: "split",
+  theme: "dark",
   terminals: [],
   activeTerminal: null,
   terminalSeq: 0,

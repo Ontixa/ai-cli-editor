@@ -124,6 +124,9 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
     }
 
     if (!hunk) continue; // preamble lines we don't care about
+    // A trailing "\n" in the patch yields an empty final element — and
+    // empty lines are never meaningful inside a hunk either.
+    if (line === "") continue;
 
     if (line.startsWith("\\")) {
       // "\ No newline at end of file" — attach as meta
@@ -158,4 +161,43 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
 export function diffStats(patch: string): { additions: number; deletions: number } {
   const d = parseUnifiedDiff(patch);
   return { additions: d.additions, deletions: d.deletions };
+}
+
+/**
+ * A row in the side-by-side view: `left` is the old-file side
+ * (context/deletion), `right` the new-file side (context/addition).
+ * `meta` rows (e.g. "\ No newline") span both columns.
+ */
+export interface SplitRow {
+  left: DiffLine | null;
+  right: DiffLine | null;
+}
+
+/**
+ * Align a hunk's line stream into left/right pairs. Context and meta lines
+ * appear on both sides; within each del/add run, the i-th deletion pairs
+ * with the i-th addition, leftovers get an empty opposite cell.
+ */
+export function toSplitRows(lines: DiffLine[]): SplitRow[] {
+  const rows: SplitRow[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const l = lines[i];
+    if (l.kind === "context" || l.kind === "meta") {
+      rows.push({ left: l, right: l });
+      i++;
+      continue;
+    }
+    const dels: DiffLine[] = [];
+    const adds: DiffLine[] = [];
+    while (i < lines.length && (lines[i].kind === "del" || lines[i].kind === "add")) {
+      (lines[i].kind === "del" ? dels : adds).push(lines[i]);
+      i++;
+    }
+    const n = Math.max(dels.length, adds.length);
+    for (let k = 0; k < n; k++) {
+      rows.push({ left: dels[k] ?? null, right: adds[k] ?? null });
+    }
+  }
+  return rows;
 }

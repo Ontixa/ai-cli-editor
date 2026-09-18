@@ -1096,3 +1096,229 @@ kbd {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* ============ light theme ============ */
+:root[data-theme="light"] {
+  --bg: #f6f8fa;
+  --bg-panel: #eef1f4;
+  --bg-elevated: #ffffff;
+  --bg-hover: #e2e7ec;
+  --bg-active: #d3dbe3;
+  --fg: #1f2328;
+  --fg-dim: #59636e;
+  --fg-faint: #8c959f;
+  --border: #d5dbe1;
+  --border-strong: #b8c0c9;
+  --accent: #0f766e;
+  --accent-dim: rgba(15, 118, 110, 0.12);
+  --green: #1a7f37;
+  --yellow: #9a6700;
+  --red: #cf222e;
+  --blue: #0969da;
+  --purple: #8250df;
+  --selection: rgba(9, 105, 218, 0.2);
+}
+:root[data-theme="light"] .dl-add .diff-text,
+:root[data-theme="light"] .split-cell.sc-add .diff-text {
+  color: #1a7f37;
+}
+:root[data-theme="light"] .dl-del .diff-text,
+:root[data-theme="light"] .split-cell.sc-del .diff-text {
+  color: #a40e26;
+}
+:root[data-theme="light"] .dl-add,
+:root[data-theme="light"] .split-cell.sc-add {
+  background: rgba(26, 127, 55, 0.1);
+}
+:root[data-theme="light"] .dl-del,
+:root[data-theme="light"] .split-cell.sc-del {
+  background: rgba(207, 34, 46, 0.08);
+}
+
+/* ============ context menu & dialogs ============ */
+.context-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 160px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+}
+.context-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.context-item:hover {
+  background: var(--bg-hover);
+}
+.context-item.danger {
+  color: var(--red);
+}
+.dialog {
+  width: 380px;
+  margin: 18vh auto 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  padding: 14px 16px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+.dialog-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.dialog-label {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 8px;
+}
+.dialog-input {
+  width: 100%;
+  padding: 6px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  outline: none;
+}
+.dialog-input:focus {
+  border-color: var(--accent);
+}
+.dialog-error {
+  color: var(--red);
+  font-size: 11.5px;
+  margin-top: 6px;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.mini-btn {
+  padding: 4px 12px;
+  font-size: 11.5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--fg);
+  background: var(--bg-active);
+}
+.mini-btn:hover {
+  background: var(--bg-hover);
+}
+.mini-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.mini-btn.primary {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.mini-btn.danger {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+/* ============ changes: commit & stage controls ============ */
+.commit-box {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.commit-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--fg);
+  font-size: 12px;
+  outline: none;
+}
+.commit-input:focus {
+  border-color: var(--accent);
+}
+.commit-input:disabled {
+  opacity: 0.45;
+}
+.commit-btn {
+  flex-shrink: 0;
+}
+.commit-error {
+  margin: 6px 10px 0;
+}
+.change-group-title {
+  display: flex;
+  align-items: center;
+}
+.change-row-wrap {
+  display: flex;
+  align-items: center;
+}
+.change-row-wrap .change-row {
+  flex: 1;
+  min-width: 0;
+}
+.row-action {
+  visibility: hidden;
+  margin-right: 8px;
+  flex-shrink: 0;
+  font-weight: 700;
+}
+.change-row-wrap:hover .row-action {
+  visibility: visible;
+}
+
+/* ============ side-by-side diff ============ */
+.split-row {
+  display: flex;
+  line-height: 1.5;
+  white-space: pre;
+}
+.split-cell {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  border-left: 1px solid var(--border);
+}
+.split-cell:first-child {
+  border-left: none;
+}
+.split-cell .diff-text {
+  overflow: hidden;
+}
+.split-cell.sc-empty {
+  background: var(--bg-panel);
+}
+.split-cell.sc-add {
+  background: rgba(63, 185, 80, 0.12);
+}
+.split-cell.sc-add .diff-text {
+  color: #d7f5dd;
+}
+.split-cell.sc-del {
+  background: rgba(248, 81, 73, 0.1);
+}
+.split-cell.sc-del .diff-text {
+  color: #f0c3be;
+}
+.split-cell.sc-meta {
+  color: var(--fg-faint);
+  font-style: italic;
+}

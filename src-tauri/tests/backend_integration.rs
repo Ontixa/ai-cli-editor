@@ -342,3 +342,127 @@ fn fs_ops_list_read_write_and_containment() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn fs_ops_create_rename_delete_and_containment() {
+    let dir = fresh_dir("fsmut");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/a.txt"), b"a\n").unwrap();
+
+    // create_file: ok, then collision rejected.
+    let f = fs_ops::create_file(&dir, "new.txt").expect("create file");
+    assert_eq!(f.path, "new.txt");
+    assert!(dir.join("new.txt").is_file());
+    assert!(fs_ops::create_file(&dir, "new.txt").is_err());
+    assert!(fs_ops::create_file(&dir, "sub/a.txt").is_err());
+
+    // create_dir: nested parents ok, collision rejected.
+    fs_ops::create_dir(&dir, "deep/nested/dir").expect("create nested dir");
+    assert!(dir.join("deep/nested/dir").is_dir());
+    assert!(fs_ops::create_dir(&dir, "deep").is_err());
+    assert!(fs_ops::create_dir(&dir, "new.txt").is_err());
+
+    // rename: file, dir, and into another dir; collisions + escapes rejected.
+    fs_ops::rename(&dir, "new.txt", "renamed.txt").expect("rename file");
+    assert!(dir.join("renamed.txt").is_file());
+    assert!(!dir.join("new.txt").exists());
+    fs_ops::rename(&dir, "renamed.txt", "sub/moved.txt").expect("move into sub");
+    assert!(dir.join("sub/moved.txt").is_file());
+    fs_ops::rename(&dir, "deep", "deep2").expect("rename dir");
+    assert!(dir.join("deep2/nested/dir").is_dir());
+    assert!(fs_ops::rename(&dir, "sub/a.txt", "sub/moved.txt").is_err());
+    assert!(fs_ops::rename(&dir, "nope.txt", "x.txt").is_err());
+
+    // delete: file then recursive dir.
+    fs_ops::delete(&dir, "sub/moved.txt").expect("delete file");
+    assert!(!dir.join("sub/moved.txt").exists());
+    fs_ops::delete(&dir, "deep2").expect("delete dir");
+    assert!(!dir.join("deep2").exists());
+    assert!(fs_ops::delete(&dir, "deep2").is_err());
+
+    // Containment: escapes must fail for every mutating op.
+    assert!(fs_ops::create_file(&dir, "../escape.txt").is_err());
+    assert!(fs_ops::create_dir(&dir, "../escape-dir").is_err());
+    assert!(fs_ops::rename(&dir, "sub/a.txt", "../escape.txt").is_err());
+    assert!(fs_ops::delete(&dir, "../").is_err());
+    assert!(fs_ops::delete(&dir, "..").is_err());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn git_stage_unstage_and_commit() {
+    if platform::find_on_path("git").is_none() {
+        return; // git not installed on this machine
+    }
+    let dir = fresh_dir("gitstage");
+    git_in(&dir, &["init", "-q"]);
+    git_in(&dir, &["config", "user.email", "t@t"]);
+    git_in(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.txt"), b"one\n").unwrap();
+    git_in(&dir, &["add", "a.txt"]);
+    git_in(&dir, &["commit", "-qm", "init"]);
+
+    // Modify + create an untracked file, then stage both through git::stage.
+    std::fs::write(dir.join("a.txt"), b"one\ntwo\n").unwrap();
+    std::fs::write(dir.join("b.txt"), b"new\n").unwrap();
+    git::stage(&dir, &["a.txt".into(), "b.txt".into()]).expect("stage");
+
+    let st = git::status(&dir).expect("status after stage");
+    let a = st.changes.iter().find(|c| c.path == "a.txt").expect("a");
+    assert_eq!(a.index, 'M');
+    assert_eq!(a.worktree, '.');
+    let b = st.changes.iter().find(|c| c.path == "b.txt").expect("b");
+    assert_eq!(b.index, 'A');
+
+    // Unstage one path; the other stays staged.
+    git::unstage(&dir, &["b.txt".into()]).expect("unstage");
+    let st = git::status(&dir).expect("status after unstage");
+    let b = st.changes.iter().find(|c| c.path == "b.txt").expect("b");
+    assert!(b.untracked);
+    let a = st.changes.iter().find(|c| c.path == "a.txt").expect("a");
+    assert_eq!(a.index, 'M');
+
+    // Empty commit message rejected; real commit succeeds and clears changes.
+    assert!(git::commit(&dir, "   ").is_err());
+    git::commit(&dir, "feat: staged change").expect("commit");
+    let st = git::status(&dir).expect("status after commit");
+    assert!(st.changes.iter().all(|c| c.path != "a.txt"));
+    assert!(st
+        .changes
+        .iter()
+        .find(|c| c.path == "b.txt")
+        .map(|c| c.untracked)
+        .unwrap_or(false));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn git_stage_in_fresh_repo_without_head() {
+    if platform::find_on_path("git").is_none() {
+        return;
+    }
+    // No commits yet — `git reset HEAD` fails; unstage must fall back.
+    let dir = fresh_dir("gitfresh");
+    git_in(&dir, &["init", "-q"]);
+    git_in(&dir, &["config", "user.email", "t@t"]);
+    git_in(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("f.txt"), b"x\n").unwrap();
+
+    git::stage(&dir, &["f.txt".into()]).expect("stage");
+    let st = git::status(&dir).expect("status");
+    assert_eq!(st.changes[0].index, 'A');
+
+    git::unstage(&dir, &["f.txt".into()]).expect("unstage fallback");
+    let st = git::status(&dir).expect("status");
+    assert!(st.changes[0].untracked);
+
+    // Re-stage so the initial commit has content.
+    git::stage(&dir, &["f.txt".into()]).expect("restage");
+    git::commit(&dir, "first").expect("initial commit");
+    let st = git::status(&dir).expect("status");
+    assert!(st.changes.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

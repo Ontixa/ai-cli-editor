@@ -129,6 +129,26 @@ fn file_exists(state: State<AppState>, path: String) -> AppResult<bool> {
     Ok(fs_ops::exists(&state.root()?, &path))
 }
 
+#[tauri::command]
+fn create_file(state: State<AppState>, path: String) -> AppResult<fs_ops::FileData> {
+    fs_ops::create_file(&state.root()?, &path)
+}
+
+#[tauri::command]
+fn create_dir(state: State<AppState>, path: String) -> AppResult<()> {
+    fs_ops::create_dir(&state.root()?, &path)
+}
+
+#[tauri::command]
+fn rename_path(state: State<AppState>, from: String, to: String) -> AppResult<()> {
+    fs_ops::rename(&state.root()?, &from, &to)
+}
+
+#[tauri::command]
+fn delete_path(state: State<AppState>, path: String) -> AppResult<()> {
+    fs_ops::delete(&state.root()?, &path)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LinkTarget {
@@ -177,6 +197,29 @@ fn git_diff(
     untracked: bool,
 ) -> AppResult<git::DiffResult> {
     git::diff(&state.root()?, &path, staged, untracked)
+}
+
+/// Stage/unstage/commit mutate only the index/HEAD, not files — so we emit
+/// `git:stale` ourselves since the watcher won't see these.
+#[tauri::command]
+fn git_stage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> AppResult<()> {
+    git::stage(&state.root()?, &paths)?;
+    let _ = app.emit("git:stale", serde_json::Value::Null);
+    Ok(())
+}
+
+#[tauri::command]
+fn git_unstage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> AppResult<()> {
+    git::unstage(&state.root()?, &paths)?;
+    let _ = app.emit("git:stale", serde_json::Value::Null);
+    Ok(())
+}
+
+#[tauri::command]
+fn git_commit(app: AppHandle, state: State<AppState>, message: String) -> AppResult<()> {
+    git::commit(&state.root()?, &message)?;
+    let _ = app.emit("git:stale", serde_json::Value::Null);
+    Ok(())
 }
 
 // ---------- search ----------
@@ -318,10 +361,17 @@ pub fn run() {
             read_file,
             write_file,
             file_exists,
+            create_file,
+            create_dir,
+            rename_path,
+            delete_path,
             resolve_link_target,
             list_all_files,
             git_status,
             git_diff,
+            git_stage,
+            git_unstage,
+            git_commit,
             search_start,
             search_cancel,
             pty_spawn,

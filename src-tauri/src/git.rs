@@ -176,6 +176,58 @@ pub fn status(root: &Path) -> AppResult<GitStatus> {
     Ok(parse_porcelain_v2(&out.stdout))
 }
 
+fn git_ok(root: &Path, args: &[&str]) -> AppResult<()> {
+    let out = git(root, args)?;
+    if !out.status.success() {
+        // git reports some failures (e.g. "nothing to commit") on stdout.
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let msg = if stderr.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            stderr
+        };
+        return Err(AppError::Internal(msg));
+    }
+    Ok(())
+}
+
+/// Stage paths (`git add -A -- <paths>` — -A covers deletions too).
+pub fn stage(root: &Path, paths: &[String]) -> AppResult<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args: Vec<&str> = vec!["add", "-A", "--"];
+    args.extend(paths.iter().map(|s| s.as_str()));
+    git_ok(root, &args)
+}
+
+/// Unstage paths. `git reset HEAD --` needs a HEAD; on a repo with no
+/// commits yet we fall back to `git rm --cached`.
+pub fn unstage(root: &Path, paths: &[String]) -> AppResult<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args: Vec<&str> = vec!["reset", "-q", "HEAD", "--"];
+    args.extend(paths.iter().map(|s| s.as_str()));
+    let out = git(root, &args)?;
+    if out.status.success() {
+        return Ok(());
+    }
+    // No HEAD yet — reset can't work; remove from index instead.
+    let mut rm: Vec<&str> = vec!["rm", "-q", "-r", "--cached", "--ignore-unmatch", "--"];
+    rm.extend(paths.iter().map(|s| s.as_str()));
+    git_ok(root, &rm)
+}
+
+/// Commit the staged index. The message is passed as an argv item —
+/// never through a shell.
+pub fn commit(root: &Path, message: &str) -> AppResult<()> {
+    if message.trim().is_empty() {
+        return Err(AppError::InvalidInput("empty commit message".into()));
+    }
+    git_ok(root, &["commit", "-m", message])
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffResult {

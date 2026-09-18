@@ -47,8 +47,14 @@ tree, a real diff — and stays fast and stable through long agent sessions.
   `23:31:02  M  src/auth.ts`, grouped when edits repeat.
 - **Follow Agent** — optionally surfaces the file the agent is currently
   editing; backs off during bursts and never rips focus while you type.
-- **Git changes + diff viewer** — staged/unstaged/untracked with a clean
-  unified-diff view (side-by-side planned).
+- **Git changes + diff viewer** — staged/unstaged/untracked, unified or
+  side-by-side diff, one-click stage/unstage, and a commit box that passes
+  your message straight to `git commit` (never through a shell).
+- **Explorer file operations** — right-click to create files/folders (nested
+  paths allowed), rename, and delete; all path-checked against the workspace
+  root.
+- **Dark + light themes** — command-palette toggle, persisted across
+  sessions, applied to the editor and the terminal too.
 - **CodeMirror 6 editor** — view-first by design; `Ctrl+E` toggles edit mode
   for the small fixes humans still make. `Ctrl+S` saves.
 - **Quick Open (`Ctrl+P`)** — fuzzy filename search over a lazy,
@@ -137,8 +143,8 @@ workspace root.
 
 ## Roadmap
 
-Near-term: side-by-side diff, configurable ignore lists, persistent
-activity history, bundled ripgrep, themes. Explicit non-goals live in
+Near-term: configurable ignore lists, persistent activity history, bundled
+ripgrep, more themes. Explicit non-goals live in
 `docs/project-roadmap.md` — LSP, extensions, and AI APIs are out of scope
 by design.
 

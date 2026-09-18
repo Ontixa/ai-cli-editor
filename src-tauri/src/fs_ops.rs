@@ -175,3 +175,65 @@ pub fn write_file(root: &Path, rel: &str, content: &str) -> AppResult<FileData> 
 pub fn exists(root: &Path, input: &str) -> bool {
     paths::resolve_existing(root, input).is_ok()
 }
+
+/// Create an empty file (missing parent dirs are created); fails if the
+/// file already exists.
+pub fn create_file(root: &Path, rel: &str) -> AppResult<FileData> {
+    let abs = paths::resolve_for_create(root, rel)?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&abs)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                AppError::InvalidInput(format!("already exists: {rel}"))
+            } else {
+                AppError::Io(e)
+            }
+        })?;
+    let meta = abs.metadata()?;
+    Ok(FileData {
+        path: paths::normalize(rel),
+        content: Some(String::new()),
+        binary: false,
+        size: 0,
+        mtime_ms: mtime_ms(&meta),
+        truncated: false,
+    })
+}
+
+/// Create a directory (including intermediate parents).
+pub fn create_dir(root: &Path, rel: &str) -> AppResult<()> {
+    let abs = paths::resolve_for_create(root, rel)?;
+    if abs.exists() {
+        return Err(AppError::InvalidInput(format!("already exists: {rel}")));
+    }
+    fs::create_dir_all(&abs)?;
+    Ok(())
+}
+
+/// Rename/move a file or directory inside the workspace.
+pub fn rename(root: &Path, from: &str, to: &str) -> AppResult<()> {
+    let src = paths::resolve_existing(root, from)?;
+    let dst = paths::resolve_for_write(root, to)?;
+    if dst.exists() {
+        return Err(AppError::InvalidInput(format!("already exists: {to}")));
+    }
+    fs::rename(&src, &dst)?;
+    Ok(())
+}
+
+/// Delete a file or directory (dirs are removed recursively — the UI is
+/// responsible for confirming first).
+pub fn delete(root: &Path, rel: &str) -> AppResult<()> {
+    let abs = paths::resolve_existing(root, rel)?;
+    if abs.is_dir() {
+        fs::remove_dir_all(&abs)?;
+    } else {
+        fs::remove_file(&abs)?;
+    }
+    Ok(())
+}

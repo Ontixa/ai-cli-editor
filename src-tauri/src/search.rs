@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn parse_rg_line() {
-        let rec = b"src/main.rs\012:5:fn main() {}\n";
+        let rec = b"src/main.rs\x0012:5:fn main() {}\n";
         let (p, l, c, t) = parse_rg_record(rec).unwrap();
         assert_eq!(p, "src/main.rs");
         assert_eq!(l, 12);
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn parse_rg_colons_in_text() {
-        let rec = b"a/b.ts\03:9:http://example.com:x=1\n";
+        let rec = b"a/b.ts\x003:9:http://example.com:x=1\n";
         let (p, _l, _c, t) = parse_rg_record(rec).unwrap();
         assert_eq!(p, "a/b.ts");
         assert_eq!(t, "http://example.com:x=1");
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn parse_rg_windows_path() {
-        let rec = b"C:\\repo\\src\\f.ts\07:1:line text\n";
+        let rec = b"C:\\repo\\src\\f.ts\x007:1:line text\n";
         let (p, l, _c, _) = parse_rg_record(rec).unwrap();
         assert_eq!(p, "C:\\repo\\src\\f.ts");
         assert_eq!(l, 7);

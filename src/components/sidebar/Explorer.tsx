@@ -2,8 +2,43 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { store } from "../../state/app";
 import { useStore, shallow } from "../../lib/store";
 import { api } from "../../lib/ipc";
-import { openFile, toggleDir, markUserAction } from "../../state/actions";
+import {
+  openFile,
+  toggleDir,
+  markUserAction,
+  fsCreateFile,
+  fsCreateDir,
+  fsRename,
+  fsDelete,
+} from "../../state/actions";
+import { ContextMenu, type MenuItem } from "../overlays/ContextMenu";
+import { InputDialog, ConfirmDialog } from "../overlays/InputDialog";
+import { buildRows, gitBadgeFor, fileClass, ROW_H, type Row } from "../../lib/explorer-model";
 import type { DirEntry, GitChange } from "../../lib/types";
+
+interface MenuState {
+  x: number;
+  y: number;
+  /** Entry the menu targets, or null for the workspace root. */
+  path: string | null;
+  isDir: boolean;
+}
+
+type DialogState =
+  | { kind: "newFile"; dir: string }
+  | { kind: "newDir"; dir: string }
+  | { kind: "rename"; path: string; initial: string }
+  | { kind: "delete"; path: string; isDir: boolean }
+  | null;
+
+/** Reject names that are empty, absolute, or escape the workspace. */
+function nameError(name: string): string | null {
+  if (!name.trim()) return "Name is required";
+  if (name.includes("\\") || name.startsWith("/")) return "Use forward slashes only";
+  const parts = name.split("/");
+  if (parts.some((p) => p === ".." || p === "")) return "Invalid path";
+  return null;
+}
 
 // Directory listing cache lives outside React; `treeBump` in the store tells
 // components when fresh data arrived. Invalidated dirs are dropped and lazily
@@ -30,105 +65,6 @@ function ensureDir(path: string) {
     .finally(() => loading.delete(path));
 }
 
-interface Row {
-  entry: DirEntry;
-  depth: number;
-  isDir: boolean;
-}
-
-const ROW_H = 26;
-
-/** Flatten the expanded tree into visible rows using the dir cache. */
-function buildRows(expanded: Record<string, boolean>): Row[] {
-  const rows: Row[] = [];
-  const walk = (dirPath: string, depth: number) => {
-    const children = dirCache.get(dirPath);
-    if (!children) return;
-    for (const e of children) {
-      const isDir = e.kind === "dir";
-      rows.push({ entry: e, depth, isDir });
-      if (isDir && expanded[e.path]) walk(e.path, depth + 1);
-    }
-  };
-  walk("", 0);
-  return rows;
-}
-
-function gitBadgeFor(path: string, isDir: boolean, byPath: Map<string, GitChange>): string | null {
-  const direct = byPath.get(path);
-  if (direct)
-    return direct.untracked ? "?" : direct.worktree !== "." ? direct.worktree : direct.index;
-  if (isDir) {
-    const prefix = path + "/";
-    for (const p of byPath.keys()) {
-      if (p.startsWith(prefix)) {
-        const c = byPath.get(p)!;
-        return c.untracked ? "?" : "M";
-      }
-    }
-  }
-  return null;
-}
-
-function fileClass(name: string): string {
-  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
-  const map: Record<string, string> = {
-    ts: "fi-ts",
-    tsx: "fi-ts",
-    mts: "fi-ts",
-    js: "fi-js",
-    jsx: "fi-js",
-    mjs: "fi-js",
-    rs: "fi-rs",
-    py: "fi-py",
-    go: "fi-go",
-    json: "fi-json",
-    jsonc: "fi-json",
-    json5: "fi-json",
-    md: "fi-md",
-    markdown: "fi-md",
-    toml: "fi-cfg",
-    yaml: "fi-cfg",
-    yml: "fi-cfg",
-    ini: "fi-cfg",
-    cfg: "fi-cfg",
-    env: "fi-cfg",
-    css: "fi-css",
-    scss: "fi-css",
-    html: "fi-html",
-    vue: "fi-vue",
-    svelte: "fi-svelte",
-    lock: "fi-lock",
-    gitignore: "fi-git",
-    gitattributes: "fi-git",
-    gitmodules: "fi-git",
-    png: "fi-img",
-    jpg: "fi-img",
-    jpeg: "fi-img",
-    gif: "fi-img",
-    svg: "fi-img",
-    ico: "fi-img",
-    webp: "fi-img",
-    sh: "fi-sh",
-    bash: "fi-sh",
-    zsh: "fi-sh",
-    ps1: "fi-sh",
-    bat: "fi-sh",
-    c: "fi-c",
-    h: "fi-c",
-    cpp: "fi-c",
-    hpp: "fi-c",
-    java: "fi-java",
-    kt: "fi-java",
-    rb: "fi-rb",
-    php: "fi-php",
-    sql: "fi-db",
-    graphql: "fi-db",
-  };
-  if (name === "Dockerfile" || name.startsWith("dockerfile")) return "fi-cfg";
-  return map[ext] ?? "fi-default";
-}
-
 export function Explorer() {
   const workspaceRoot = useStore(store, (s) => s.workspace?.root);
   const expanded = useStore(store, (s) => s.expanded);
@@ -143,6 +79,8 @@ export function Explorer() {
   const [scrollTop, setScrollTop] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const [viewH, setViewH] = useState(400);
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const [dialog, setDialog] = useState<DialogState>(null);
 
   const gitByPath = useMemo(() => {
     const m = new Map<string, GitChange>();
@@ -179,7 +117,7 @@ export function Explorer() {
   // `treeBump` is the invalidation signal for the external dirCache — the
   // memo must re-run when it changes even though it isn't referenced inside.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const rows = useMemo(() => buildRows(expanded), [expanded, treeBump]);
+  const rows = useMemo(() => buildRows(expanded, dirCache), [expanded, treeBump]);
 
   // Track the active file: select + reveal on demand.
   const activePath = useMemo(() => {
@@ -262,6 +200,55 @@ export function Explorer() {
     [rows, selected, expanded, activate],
   );
 
+  const openMenu = useCallback((e: React.MouseEvent, row: Row | null) => {
+    e.preventDefault();
+    e.stopPropagation();
+    markUserAction();
+    if (row) setSelected(row.entry.path);
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      path: row?.entry.path ?? null,
+      isDir: row?.isDir ?? false,
+    });
+  }, []);
+
+  const menuItems = useMemo(() => {
+    if (!menu) return [];
+    // New items go inside the targeted dir, or beside a targeted file.
+    const dir =
+      menu.path == null ? "" : menu.isDir ? menu.path : menu.path.split("/").slice(0, -1).join("/");
+    const items: MenuItem[] = [
+      {
+        label: "New File…",
+        onSelect: () => setDialog({ kind: "newFile", dir }),
+      },
+      {
+        label: "New Folder…",
+        onSelect: () => setDialog({ kind: "newDir", dir }),
+      },
+    ];
+    if (menu.path != null) {
+      items.push(
+        {
+          label: "Rename…",
+          onSelect: () =>
+            setDialog({
+              kind: "rename",
+              path: menu.path!,
+              initial: menu.path!.split("/").pop()!,
+            }),
+        },
+        {
+          label: "Delete",
+          danger: true,
+          onSelect: () => setDialog({ kind: "delete", path: menu.path!, isDir: menu.isDir }),
+        },
+      );
+    }
+    return items;
+  }, [menu]);
+
   const startIdx = Math.max(0, Math.floor(scrollTop / ROW_H) - 4);
   const endIdx = Math.min(rows.length, Math.ceil((scrollTop + viewH) / ROW_H) + 4);
   const slice = rows.slice(startIdx, endIdx);
@@ -274,6 +261,12 @@ export function Explorer() {
         className="explorer-scroll"
         ref={containerRef}
         onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
+        onContextMenu={(e) => {
+          // Only blank space opens the root menu; rows stopPropagation first.
+          if (e.target === e.currentTarget || !(e.target as HTMLElement).closest(".tree-row")) {
+            openMenu(e, null);
+          }
+        }}
       >
         <div style={{ height: rows.length * ROW_H, position: "relative" }}>
           {slice.map((row, i) => {
@@ -291,6 +284,7 @@ export function Explorer() {
                 aria-expanded={row.isDir ? !!expanded[e.path] : undefined}
                 onClick={() => activate(row)}
                 onDoubleClick={() => !row.isDir && void 0}
+                onContextMenu={(e) => openMenu(e, row)}
                 title={e.path}
               >
                 <span
@@ -309,6 +303,52 @@ export function Explorer() {
         </div>
         {rows.length === 0 && <div className="empty-hint">empty folder</div>}
       </div>
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
+      {dialog?.kind === "newFile" && (
+        <InputDialog
+          title="New File"
+          label={`Create in ${dialog.dir || "workspace root"}`}
+          submitLabel="Create"
+          validate={nameError}
+          onSubmit={(v) => fsCreateFile(dialog.dir, v)}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "newDir" && (
+        <InputDialog
+          title="New Folder"
+          label={`Create in ${dialog.dir || "workspace root"}`}
+          submitLabel="Create"
+          validate={nameError}
+          onSubmit={(v) => fsCreateDir(dialog.dir, v)}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "rename" && (
+        <InputDialog
+          title="Rename"
+          label={dialog.path}
+          initial={dialog.initial}
+          submitLabel="Rename"
+          validate={nameError}
+          onSubmit={(v) => fsRename(dialog.path, v)}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "delete" && (
+        <ConfirmDialog
+          title={`Delete ${dialog.isDir ? "folder" : "file"}`}
+          message={
+            dialog.isDir
+              ? `Delete ${dialog.path} and all its contents? This cannot be undone.`
+              : `Delete ${dialog.path}? This cannot be undone.`
+          }
+          onConfirm={() => void fsDelete(dialog.path)}
+          onClose={() => setDialog(null)}
+        />
+      )}
     </div>
   );
 }

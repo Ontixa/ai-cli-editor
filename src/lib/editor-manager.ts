@@ -9,7 +9,7 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirro
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
-import { editorTheme, syntaxTheme } from "./cm-theme";
+import { cmThemeFor, type CmThemeName } from "./cm-theme";
 import { languageFor } from "./lang";
 import { api } from "./ipc";
 import type { DocMeta } from "../state/app";
@@ -19,17 +19,22 @@ interface DocRecord {
   editableComp: Compartment;
   readOnlyComp: Compartment;
   langComp: Compartment;
+  themeComp: Compartment;
   editable: boolean;
   forceReadOnly: boolean;
 }
 
-function baseExtensions(rec: {
-  editableComp: Compartment;
-  readOnlyComp: Compartment;
-  langComp: Compartment;
-  editable: boolean;
-  forceReadOnly: boolean;
-}): Extension[] {
+function baseExtensions(
+  rec: {
+    editableComp: Compartment;
+    readOnlyComp: Compartment;
+    langComp: Compartment;
+    themeComp: Compartment;
+    editable: boolean;
+    forceReadOnly: boolean;
+  },
+  theme: CmThemeName,
+): Extension[] {
   const effectiveEditable = rec.editable && !rec.forceReadOnly;
   return [
     lineNumbers(),
@@ -39,8 +44,7 @@ function baseExtensions(rec: {
     highlightSelectionMatches(),
     history(),
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
-    editorTheme,
-    syntaxTheme,
+    rec.themeComp.of(cmThemeFor(theme)),
     rec.langComp.of([]),
     rec.editableComp.of(EditorView.editable.of(effectiveEditable)),
     rec.readOnlyComp.of(EditorState.readOnly.of(!effectiveEditable)),
@@ -56,6 +60,8 @@ class EditorManager {
   private selfWrites = new Map<string, number>();
   /** path → requested cursor position consumed on next attach. */
   private pendingJumps = new Map<string, { line: number; col?: number }>();
+  /** Current UI theme — new editor states are built with it. */
+  private theme: CmThemeName = "dark";
 
   /**
    * Load (or reuse) a document record. Returns doc metadata to merge into
@@ -90,16 +96,29 @@ class EditorManager {
     };
   }
 
+  /** Reconfigure all live + detached editor states to a new theme. */
+  setTheme(theme: CmThemeName) {
+    if (theme === this.theme) return;
+    this.theme = theme;
+    for (const [path, rec] of this.docs) {
+      const effects = [rec.themeComp.reconfigure(cmThemeFor(theme))];
+      const view = this.views.get(path);
+      if (view) view.dispatch({ effects });
+      else rec.state = rec.state.update({ effects }).state;
+    }
+  }
+
   private buildState(text: string, forceReadOnly: boolean): DocRecord {
     const rec: DocRecord = {
       editableComp: new Compartment(),
       readOnlyComp: new Compartment(),
       langComp: new Compartment(),
+      themeComp: new Compartment(),
       editable: false,
       forceReadOnly,
       state: null as unknown as EditorState,
     };
-    rec.state = EditorState.create({ doc: text, extensions: baseExtensions(rec) });
+    rec.state = EditorState.create({ doc: text, extensions: baseExtensions(rec, this.theme) });
     return rec;
   }
 
@@ -241,7 +260,10 @@ class EditorManager {
       });
       view.scrollDOM.scrollTop = scrollTop;
     } else {
-      rec.state = EditorState.create({ doc: text, extensions: baseExtensions(rec) });
+      rec.state = EditorState.create({
+        doc: text,
+        extensions: baseExtensions(rec, this.theme),
+      });
     }
     return { status: "reloaded", mtimeMs: data.mtimeMs };
   }

@@ -35,6 +35,7 @@ export default [
         MouseEvent: "readonly",
         PointerEvent: "readonly",
         Event: "readonly",
+        Node: "readonly",
         MutationObserver: "readonly",
         ResizeObserver: "readonly",
         process: "readonly",

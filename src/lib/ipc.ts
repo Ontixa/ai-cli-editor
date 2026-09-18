@@ -26,6 +26,10 @@ export const api = {
   readFile: (path: string) => invoke<FileData>("read_file", { path }),
   writeFile: (path: string, content: string) => invoke<FileData>("write_file", { path, content }),
   fileExists: (path: string) => invoke<boolean>("file_exists", { path }),
+  createFile: (path: string) => invoke<FileData>("create_file", { path }),
+  createDir: (path: string) => invoke<void>("create_dir", { path }),
+  renamePath: (from: string, to: string) => invoke<void>("rename_path", { from, to }),
+  deletePath: (path: string) => invoke<void>("delete_path", { path }),
   resolveLinkTarget: (path: string, line?: number, col?: number) =>
     invoke<LinkTarget | null>("resolve_link_target", {
       path,
@@ -40,6 +44,9 @@ export const api = {
       staged,
       untracked,
     }),
+  gitStage: (paths: string[]) => invoke<void>("git_stage", { paths }),
+  gitUnstage: (paths: string[]) => invoke<void>("git_unstage", { paths }),
+  gitCommit: (message: string) => invoke<void>("git_commit", { message }),
   searchStart: (query: string, caseSensitive: boolean, regex: boolean) =>
     invoke<number>("search_start", { query, caseSensitive, regex }),
   searchCancel: () => invoke<void>("search_cancel"),

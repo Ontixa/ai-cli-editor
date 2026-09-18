@@ -102,6 +102,19 @@ export function registerCommands() {
       run: () => A.toggleSidebar(),
     },
     {
+      id: "workbench.toggleTheme",
+      title: "Toggle Theme (Dark / Light)",
+      category: "View",
+      run: () => A.toggleTheme(),
+    },
+    {
+      id: "workbench.toggleDiffMode",
+      title: "Toggle Diff Mode (Unified / Split)",
+      category: "View",
+      when: hasWorkspace,
+      run: () => A.setDiffMode(store.get().diffMode === "split" ? "unified" : "split"),
+    },
+    {
       id: "file.save",
       title: "Save File",
       category: "File",

@@ -33,6 +33,30 @@ const TERM_THEME = {
   brightWhite: "#e6edf3",
 };
 
+const TERM_THEME_LIGHT = {
+  background: "#f6f8fa",
+  foreground: "#1f2328",
+  cursor: "#0f766e",
+  cursorAccent: "#f6f8fa",
+  selectionBackground: "#b6d5f2",
+  black: "#57606a",
+  red: "#cf222e",
+  green: "#116329",
+  yellow: "#9a6700",
+  blue: "#0969da",
+  magenta: "#8250df",
+  cyan: "#0a7ea4",
+  white: "#6e7781",
+  brightBlack: "#8c959f",
+  brightRed: "#a40e26",
+  brightGreen: "#1a7f37",
+  brightYellow: "#7d4e00",
+  brightBlue: "#0757ba",
+  brightMagenta: "#6639ba",
+  brightCyan: "#076982",
+  brightWhite: "#1f2328",
+};
+
 interface Props {
   session: TerminalSession;
   visible: boolean;
@@ -51,7 +75,7 @@ export function TerminalView({ session, visible }: Props) {
     if (!host) return;
 
     const term = new Terminal({
-      theme: TERM_THEME,
+      theme: store.get().theme === "light" ? TERM_THEME_LIGHT : TERM_THEME,
       fontFamily: "Cascadia Code, JetBrains Mono, Consolas, monospace",
       fontSize: 13,
       lineHeight: 1.25,
@@ -156,11 +180,17 @@ export function TerminalView({ session, visible }: Props) {
     };
     const linkDisp = term.registerLinkProvider(provider);
 
+    // Live theme switching — xterm supports reassigning options.theme.
+    const themeSub = store.subscribe(() => {
+      term.options.theme = store.get().theme === "light" ? TERM_THEME_LIGHT : TERM_THEME;
+    });
+
     return () => {
       disposed = true;
       dataSub.dispose();
       binSub.dispose();
       linkDisp.dispose();
+      themeSub();
       for (const u of unlisteners) u();
       const id = ptyIdRef.current;
       if (id !== null) void api.ptyKill(id).catch(() => {});

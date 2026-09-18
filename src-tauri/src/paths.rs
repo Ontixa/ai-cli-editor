@@ -100,6 +100,36 @@ pub fn resolve_for_write(root: &Path, input: &str) -> AppResult<PathBuf> {
     Ok(canon_parent.join(candidate.file_name().unwrap_or_default()))
 }
 
+/// Resolve a path whose intermediate parents may not exist yet — used by
+/// create-style operations that create missing directories. Canonicalizes
+/// the deepest existing ancestor and verifies containment, then re-appends
+/// the missing tail components. `symlink_metadata` is used for the
+/// existence check so a dangling symlink can't hide inside the tail.
+pub fn resolve_for_create(root: &Path, input: &str) -> AppResult<PathBuf> {
+    let candidate = join_candidate(root, input)?;
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut cursor: &Path = &candidate;
+    let ancestor = loop {
+        if cursor.symlink_metadata().is_ok() {
+            break cursor.to_path_buf();
+        }
+        missing.push(PathBuf::from(cursor.file_name().unwrap_or_default()));
+        cursor = match cursor.parent() {
+            Some(p) => p,
+            None => return Err(AppError::NotFound(input.to_string())),
+        };
+    };
+    let canon = ancestor.canonicalize()?;
+    if !canon.starts_with(root) {
+        return Err(AppError::OutsideWorkspace(input.to_string()));
+    }
+    let mut out = canon;
+    for seg in missing.iter().rev() {
+        out.push(seg);
+    }
+    Ok(out)
+}
+
 fn join_candidate(root: &Path, input: &str) -> AppResult<PathBuf> {
     if input.trim().is_empty() {
         return Err(AppError::InvalidInput("empty path".into()));

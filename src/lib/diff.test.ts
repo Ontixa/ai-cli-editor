@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseUnifiedDiff, diffStats } from "./diff";
+import { parseUnifiedDiff, diffStats, toSplitRows } from "./diff";
 
 const SAMPLE = `diff --git a/src/a.ts b/src/a.ts
 index 1111111..2222222 100644
@@ -98,5 +98,54 @@ Binary files a/x.png and b/x.png differ
 describe("diffStats", () => {
   it("counts additions and deletions", () => {
     expect(diffStats(SAMPLE)).toEqual({ additions: 3, deletions: 2 });
+  });
+});
+
+describe("toSplitRows", () => {
+  it("pairs context on both sides and del/add runs index-wise", () => {
+    const d = parseUnifiedDiff(SAMPLE);
+    const rows = toSplitRows(d.hunks[0].lines);
+    // hunk0 lines: context, -old, +new, +added, context, context
+    expect(rows).toHaveLength(5);
+    expect(rows[0].left?.kind).toBe("context");
+    expect(rows[0].right?.kind).toBe("context");
+    expect(rows[0].left?.oldNo).toBe(1);
+    expect(rows[0].right?.newNo).toBe(1);
+    // del "old line" pairs with add "new line"
+    expect(rows[1].left?.text).toBe("old line");
+    expect(rows[1].right?.text).toBe("new line");
+    // extra addition has empty left
+    expect(rows[2].left).toBeNull();
+    expect(rows[2].right?.text).toBe("added line");
+  });
+
+  it("leaves right side empty for pure deletions", () => {
+    const d = parseUnifiedDiff(`@@ -1,2 +1,1 @@
+-aaa
+-bbb
+ ctx
+`);
+    const rows = toSplitRows(d.hunks[0].lines);
+    expect(rows).toHaveLength(3);
+    expect(rows[0].left?.text).toBe("aaa");
+    expect(rows[0].right).toBeNull();
+    expect(rows[1].left?.text).toBe("bbb");
+    expect(rows[1].right).toBeNull();
+    expect(rows[2].left?.kind).toBe("context");
+    expect(rows[2].right?.kind).toBe("context");
+  });
+
+  it("handles meta lines spanning both sides", () => {
+    const d = parseUnifiedDiff(`@@ -1,1 +1,1 @@
+-old
+\\ No newline at end of file
++new
+\\ No newline at end of file
+`);
+    const rows = toSplitRows(d.hunks[0].lines);
+    // del+add pair, then meta, meta — metas pair with themselves
+    const metas = rows.filter((r) => r.left?.kind === "meta");
+    expect(metas).toHaveLength(2);
+    expect(metas[0].right?.kind).toBe("meta");
   });
 });

@@ -40,12 +40,15 @@ function persistNow() {
     terminalVisible: s.terminalVisible,
     terminalHeight: s.terminalHeight,
     followAgent: s.followAgent,
+    diffMode: s.diffMode,
+    theme: s.theme,
     recentFiles: s.recentFiles.slice(0, 20),
   });
 }
 
 export async function boot() {
   if (!inTauri()) return;
+  applyTheme(store.get().theme);
   void api.detectAgents().then((agents) => store.set({ agents }));
   void api.defaultShell().then((sh) => store.set({ shellLabel: sh.label }));
 
@@ -64,10 +67,13 @@ export async function boot() {
     terminalVisible: restored.terminalVisible !== false,
     terminalHeight: Number(restored.terminalHeight) || 260,
     followAgent: restored.followAgent !== false,
+    diffMode: restored.diffMode === "unified" ? "unified" : "split",
+    theme: restored.theme === "light" ? "light" : "dark",
     recentFiles: Array.isArray(restored.recentFiles)
       ? (restored.recentFiles as string[]).filter((x) => typeof x === "string")
       : [],
   });
+  applyTheme(store.get().theme);
 
   const ws = restored.workspace as { root?: string } | null;
   if (ws?.root) {
@@ -412,6 +418,29 @@ export async function refreshGit() {
   }
 }
 
+export async function stagePaths(paths: string[]) {
+  if (!paths.length) return;
+  await api.gitStage(paths).catch(() => {});
+  void refreshGit();
+}
+
+export async function unstagePaths(paths: string[]) {
+  if (!paths.length) return;
+  await api.gitUnstage(paths).catch(() => {});
+  void refreshGit();
+}
+
+/** Commit the staged index. Returns an error string or null on success. */
+export async function commitStaged(message: string): Promise<string | null> {
+  try {
+    await api.gitCommit(message);
+    void refreshGit();
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
 export function scheduleGitRefresh() {
   if (gitRefreshTimer) clearTimeout(gitRefreshTimer);
   gitRefreshTimer = setTimeout(refreshGit, 350);
@@ -621,4 +650,91 @@ export function setTerminalHeight(h: number) {
 
 export function clearActivity() {
   store.set({ activity: [] });
+}
+
+// ---------- theme / view prefs ----------
+
+export function applyTheme(theme: AppState["theme"]) {
+  document.documentElement.dataset.theme = theme;
+  editorManager.setTheme(theme);
+}
+
+export function toggleTheme() {
+  const next = store.get().theme === "dark" ? "light" : "dark";
+  store.set({ theme: next });
+  applyTheme(next);
+  markUserAction();
+  schedulePersist();
+}
+
+export function setDiffMode(mode: AppState["diffMode"]) {
+  store.set({ diffMode: mode });
+  markUserAction();
+  schedulePersist();
+}
+
+// ---------- explorer file operations ----------
+
+/** Invalidate an explorer directory listing (triggers a lazy refetch). */
+export function invalidateDir(dir: string) {
+  const s = store.get();
+  store.set({
+    dirInvalidations: { ...s.dirInvalidations, [dir]: (s.dirInvalidations[dir] ?? 0) + 1 },
+  });
+}
+
+function joinRel(dir: string, name: string): string {
+  return dir ? `${dir}/${name}` : name;
+}
+
+/** Returns an error string or null on success. */
+export async function fsCreateFile(dir: string, name: string): Promise<string | null> {
+  const rel = joinRel(dir, name.trim());
+  try {
+    await api.createFile(rel);
+    invalidateDir(dir);
+    scheduleGitRefresh();
+    void openFile(rel);
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+export async function fsCreateDir(dir: string, name: string): Promise<string | null> {
+  const rel = joinRel(dir, name.trim());
+  try {
+    await api.createDir(rel);
+    invalidateDir(dir);
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+export async function fsRename(path: string, newName: string): Promise<string | null> {
+  const to = joinRel(parentOf(path), newName.trim());
+  if (to === path) return null;
+  try {
+    await api.renamePath(path, to);
+    const dir = parentOf(path);
+    invalidateDir(dir);
+    const newDir = parentOf(to);
+    if (newDir !== dir) invalidateDir(newDir);
+    scheduleGitRefresh();
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+export async function fsDelete(path: string): Promise<string | null> {
+  try {
+    await api.deletePath(path);
+    invalidateDir(parentOf(path));
+    scheduleGitRefresh();
+    return null;
+  } catch (e) {
+    return String(e);
+  }
 }
