@@ -75,12 +75,15 @@ tree, a real diff — and stays fast and stable through long agent sessions.
   `opencode`, `aider`, `amp`, `qwen`, `crush`, `copilot`, and any other
   CLI. Detected agents get one-click launch buttons; missing ones get a
   one-click install chip (always confirmation-first, run in the open).
-- **Token & cost metering** — the session registry scans PTY output for
-  the usage reports each CLI prints (aider's sent/received + session
-  cost, codex's `tokens used`, Claude's `/cost` table, Gemini's `/stats`)
-  and shows per-session and per-project token counts with reported cost —
-  or a clearly-marked `≈` estimate from a static price table when the CLI
-  reports tokens but no price. Metered usage persists in session history.
+- **Live token & cost telemetry** — the session registry scans PTY output
+  for the reports each CLI prints (aider's sent/received + session cost,
+  codex's `tokens used` + `% context left` footer + `model:` banner,
+  Claude's `/cost` table incl. cache-read tokens, Gemini's `/stats`)
+  and shows them live on each session card — model, context remaining,
+  in/out/cached token breakdown, reported cost or a clearly-marked `≈`
+  estimate from a static price table. Per-project totals sit in the
+  status bar; **all-time totals per CLI** live in the Agents panel and
+  persist across restarts in `sessions.json`.
 - **Live file watching** — creations, edits, deletes and renames land in the
   tree, the Changes panel, Agent Activity, and session attribution the
   moment they happen.

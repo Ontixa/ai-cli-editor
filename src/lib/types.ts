@@ -132,11 +132,40 @@ export interface AgentSession {
   tokensIn: number;
   tokensOut: number;
   tokensTotal: number;
+  /** Prompt-cache read/creation tokens the CLI reported. */
+  tokensCached: number;
   /** USD cost the CLI itself printed — the exact figure. */
   costUsd: number;
   /** Estimate from the static price table when no cost was reported —
    *  show as `≈$x`, never as an exact bill. */
   costEstimated: number;
+  /** Model identifier the CLI announced on its output, when known. */
+  model?: string | null;
+  /** Latest "% context left" the CLI reported, when it reports one. */
+  contextLeftPct?: number | null;
+}
+
+/** All-time usage for one agent kind (or the grand total): the finalized
+ *  counter persists in sessions.json and grows forever — live session
+ *  meters are summed on top of it. */
+export interface AgentUsage {
+  /** Sessions that contributed to this counter. */
+  sessions: number;
+  tokensIn: number;
+  tokensOut: number;
+  tokensTotal: number;
+  tokensCached: number;
+  /** Reported (exact) USD. */
+  costUsd: number;
+  /** Estimated USD for sessions whose CLI reports tokens but no cost. */
+  costEstimated: number;
+}
+
+/** Global usage attached to every `session:update` — identical on every
+ *  event regardless of which workspace it was computed for. */
+export interface UsageReport {
+  byAgent: Record<string, AgentUsage>;
+  total: AgentUsage;
 }
 
 export interface Collision {
@@ -151,6 +180,8 @@ export interface SessionsEvent {
   root: string;
   sessions: AgentSession[];
   collisions: Collision[];
+  /** All-time usage — global, same payload on every event. */
+  usage: UsageReport;
 }
 
 // ---------- worktrees ----------

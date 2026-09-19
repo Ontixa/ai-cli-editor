@@ -22,7 +22,11 @@ import {
   sessionCost,
   fmtTokens,
   fmtCost,
+  fmtPct,
   usageTotals,
+  usageAgents,
+  usageTokens,
+  usageCostLabel,
 } from "../../lib/agents";
 import type { AgentSession, CheckpointMeta, RestorePlan, WorktreeInfo } from "../../lib/types";
 
@@ -42,10 +46,12 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
   const lastCmd = [...s.commands].reverse().find((c) => !c.running);
   const tokens = sessionTokens(s);
   const cost = sessionCost(s);
+  const ctx = s.contextLeftPct;
   const tokenTitle = [
     s.tokensIn ? `in ${s.tokensIn.toLocaleString()}` : "",
     s.tokensOut ? `out ${s.tokensOut.toLocaleString()}` : "",
     s.tokensTotal ? `total ${s.tokensTotal.toLocaleString()}` : "",
+    s.tokensCached ? `cached ${s.tokensCached.toLocaleString()}` : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -94,9 +100,27 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
             {s.touchedCount} files
           </span>
         )}
+        {s.model && (
+          <span className="sess-tag model" title="model reported by CLI">
+            {s.model}
+          </span>
+        )}
+        {ctx != null && s.live && (
+          <span
+            className={`sess-tag ctx ${ctx < 20 ? "warn" : ""}`}
+            title={`context window remaining — ${ctx.toFixed(1)}%`}
+          >
+            ◔ {fmtPct(ctx)}
+          </span>
+        )}
         {tokens > 0 && (
           <span className="sess-tag tok" title={`tokens used — ${tokenTitle}`}>
             ⭑ {fmtTokens(tokens)}
+          </span>
+        )}
+        {s.tokensCached > 0 && (
+          <span className="sess-tag cache" title="prompt-cache read/creation tokens">
+            ⟲ {fmtTokens(s.tokensCached)}
           </span>
         )}
         {cost && (
@@ -403,6 +427,7 @@ export function Agents() {
   const collisions = useStore(store, (s) => s.collisions, shallow);
   const worktrees = useStore(store, (s) => s.worktrees, shallow);
   const checkpoints = useStore(store, (s) => s.checkpoints, shallow);
+  const usage = useStore(store, (s) => s.usage);
   const isRepo = useStore(store, (s) => s.git.isRepo);
   const [creating, setCreating] = useState(false);
   const [showStale, setShowStale] = useState(false);
@@ -416,6 +441,19 @@ export function Agents() {
 
   const totals = useMemo(() => usageTotals(sessions), [sessions]);
   const totalCost = totals.costUsd + totals.costEstimated;
+  // All-time usage — persisted backend counters + live meters, global
+  // across every project. Per-agent rows sorted by tokens desc.
+  const agentIds = useMemo(() => usageAgents(usage.byAgent), [usage]);
+  const uTokens = usageTokens(usage.total);
+  const uCostLabel = usageCostLabel(usage.total);
+  const uTitle =
+    `all-time usage across ${usage.total.sessions} metered session(s)` +
+    ` — in ${usage.total.tokensIn.toLocaleString()}` +
+    ` · out ${usage.total.tokensOut.toLocaleString()}` +
+    (usage.total.tokensCached > 0 ? ` · cached ${usage.total.tokensCached.toLocaleString()}` : "") +
+    (usage.total.tokensTotal > 0 ? ` · total ${usage.total.tokensTotal.toLocaleString()}` : "") +
+    (usage.total.costUsd > 0 ? ` — $${usage.total.costUsd.toFixed(2)} reported` : "") +
+    (usage.total.costEstimated > 0 ? ` + ≈$${usage.total.costEstimated.toFixed(2)} estimated` : "");
   const totalsTitle =
     `tokens used across ${sessions.length} session(s)` +
     (totalCost > 0
@@ -447,6 +485,45 @@ export function Agents() {
             .slice(0, 3)
             .map((c) => collisionSummary(c, sessionById))
             .join("; ")}
+        </div>
+      )}
+
+      {usage.total.sessions > 0 && (
+        <div className="usage-block">
+          <div className="usage-head">
+            <span className="dim">all time</span>
+            <span className="count">{usage.total.sessions}</span>
+            {(uTokens > 0 || uCostLabel) && (
+              <span className="usage-total" title={uTitle}>
+                ⭑ {fmtTokens(uTokens)}
+                {uCostLabel ? ` · ${uCostLabel}` : ""}
+              </span>
+            )}
+            <span className="spacer" />
+          </div>
+          {agentIds.map((id) => {
+            const u = usage.byAgent[id];
+            const c = usageCostLabel(u);
+            const title =
+              `${u.sessions} session(s)` +
+              ` · in ${u.tokensIn.toLocaleString()}` +
+              ` · out ${u.tokensOut.toLocaleString()}` +
+              (u.tokensCached > 0 ? ` · cached ${u.tokensCached.toLocaleString()}` : "") +
+              (u.tokensTotal > 0 ? ` · total ${u.tokensTotal.toLocaleString()}` : "");
+            return (
+              <div className="usage-row" key={id} title={title}>
+                <span className="usage-agent">{agentName(id)}</span>
+                {u.tokensCached > 0 && (
+                  <span className="dim" title="cached tokens">
+                    ⟲ {fmtTokens(u.tokensCached)}
+                  </span>
+                )}
+                <span className="spacer" />
+                <span className="usage-tok">⭑ {fmtTokens(usageTokens(u))}</span>
+                {c && <span className="usage-cost">{c}</span>}
+              </div>
+            );
+          })}
         </div>
       )}
 

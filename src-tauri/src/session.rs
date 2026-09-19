@@ -138,11 +138,77 @@ pub struct SessionSnapshot {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub tokens_total: u64,
+    /// Prompt-cache read/creation tokens the CLI reported.
+    pub tokens_cached: u64,
     /// USD cost the CLI itself printed — the exact figure.
     pub cost_usd: f64,
     /// Derived from the static price table when the CLI reports tokens but
     /// no cost. UI shows this as `≈$x` — it is an estimate, not a bill.
     pub cost_estimated: f64,
+    /// Model identifier the CLI announced on its output, when known.
+    pub model: Option<String>,
+    /// Latest "% context left" the CLI reported, when it reports one.
+    pub context_left_pct: Option<f64>,
+}
+
+/// Accumulated usage for one agent kind (or the grand total): the
+/// finalized counter lives in sessions.json and grows forever, so it is
+/// the real "all-time" figure — not bounded by session-history depth.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUsage {
+    /// Sessions that contributed to this counter.
+    pub sessions: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub tokens_total: u64,
+    pub tokens_cached: u64,
+    /// Reported (exact) USD.
+    pub cost_usd: f64,
+    /// Estimated USD for sessions whose CLI reports tokens but no cost.
+    #[serde(default)]
+    pub cost_estimated: f64,
+}
+
+impl AgentUsage {
+    /// Fold one session's meter in. `agent` prices the estimate — kept
+    /// per-session so mixed reported/estimated sessions stay honest.
+    fn add(&mut self, agent: &str, m: &crate::meter::Meter) {
+        self.sessions += 1;
+        self.tokens_in += m.tokens_in;
+        self.tokens_out += m.tokens_out;
+        self.tokens_total += m.tokens_total;
+        self.tokens_cached += m.tokens_cached;
+        self.cost_usd += m.cost_usd;
+        self.cost_estimated += m.estimated_cost(agent).unwrap_or(0.0);
+    }
+
+    fn accumulate(&mut self, o: &AgentUsage) {
+        self.sessions += o.sessions;
+        self.tokens_in += o.tokens_in;
+        self.tokens_out += o.tokens_out;
+        self.tokens_total += o.tokens_total;
+        self.tokens_cached += o.tokens_cached;
+        self.cost_usd += o.cost_usd;
+        self.cost_estimated += o.cost_estimated;
+    }
+
+    fn has_usage(&self) -> bool {
+        self.tokens_in + self.tokens_out + self.tokens_total + self.tokens_cached > 0
+            || self.cost_usd > 0.0
+            || self.cost_estimated > 0.0
+    }
+}
+
+/// Global usage attached to every `session:update` — finalized counters
+/// plus the still-running meters of unfinalized sessions, split by agent.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReport {
+    /// Every agent kind with nonzero usage, keyed by agent id.
+    pub by_agent: HashMap<String, AgentUsage>,
+    /// Sum across agents.
+    pub total: AgentUsage,
 }
 
 /// Operational warning surfaced when sessions plausibly collide.
@@ -165,6 +231,9 @@ pub struct SessionsEvent {
     pub root: String,
     pub sessions: Vec<SessionSnapshot>,
     pub collisions: Vec<Collision>,
+    /// All-time usage: persisted finalized counters + live meters.
+    /// Global (app-wide), identical on every event regardless of root.
+    pub usage: UsageReport,
 }
 
 #[derive(Debug)]
@@ -193,6 +262,9 @@ struct AgentSession {
     git_at: u64,
     /// Usage meter fed from this session's PTY output.
     meter: crate::meter::Meter,
+    /// True once the meter has been folded into the finalized counters —
+    /// guards against double-counting on restart/dedup paths.
+    metered_final: bool,
 }
 
 impl AgentSession {
@@ -277,8 +349,11 @@ impl AgentSession {
             tokens_in: self.meter.tokens_in,
             tokens_out: self.meter.tokens_out,
             tokens_total: self.meter.tokens_total,
+            tokens_cached: self.meter.tokens_cached,
             cost_usd: self.meter.cost_usd,
             cost_estimated: self.meter.estimated_cost(&self.agent).unwrap_or(0.0),
+            model: self.meter.model.clone(),
+            context_left_pct: self.meter.context_left_pct,
         }
     }
 
@@ -301,7 +376,10 @@ impl AgentSession {
             tokens_in: self.meter.tokens_in,
             tokens_out: self.meter.tokens_out,
             tokens_total: self.meter.tokens_total,
+            tokens_cached: self.meter.tokens_cached,
             cost_usd: self.meter.cost_usd,
+            model: self.meter.model.clone(),
+            metered_final: self.metered_final,
         }
     }
 }
@@ -340,7 +418,15 @@ pub struct PersistedSession {
     #[serde(default)]
     pub tokens_total: u64,
     #[serde(default)]
+    pub tokens_cached: u64,
+    #[serde(default)]
     pub cost_usd: f64,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// True when this session's meter already lives in the finalized
+    /// counters — old archives without the flag are folded in once on load.
+    #[serde(default)]
+    pub metered_final: bool,
 }
 
 impl From<PersistedSession> for AgentSession {
@@ -382,8 +468,11 @@ impl From<PersistedSession> for AgentSession {
                 p.tokens_in,
                 p.tokens_out,
                 p.tokens_total,
+                p.tokens_cached,
                 p.cost_usd,
+                p.model,
             ),
+            metered_final: p.metered_final,
         }
     }
 }
@@ -403,6 +492,34 @@ struct Inner {
     /// race: waiter thread can fire before `spawn` inserts). Checked on
     /// spawn, then dropped — bounded by live PTY count.
     exited_ptys: HashMap<u64, Option<i64>>,
+    /// All-time usage counters by agent kind — persisted in sessions.json
+    /// and restored on launch. Sessions still in the registry are summed
+    /// live on top of this; restored sessions fold in once at load.
+    usage_finalized: HashMap<String, AgentUsage>,
+}
+
+impl Inner {
+    /// Finalized counters + every still-registered session's live meter.
+    /// Agents with nothing metered (plain shells) are omitted so the UI
+    /// only lists CLIs that actually reported usage.
+    fn usage_report(&self) -> UsageReport {
+        let mut by_agent = self.usage_finalized.clone();
+        for s in self.sessions.values() {
+            if s.metered_final {
+                continue;
+            }
+            by_agent
+                .entry(s.agent.clone())
+                .or_default()
+                .add(&s.agent, &s.meter);
+        }
+        by_agent.retain(|_, u| u.has_usage());
+        let mut total = AgentUsage::default();
+        for u in by_agent.values() {
+            total.accumulate(u);
+        }
+        UsageReport { by_agent, total }
+    }
 }
 
 /// Parameters recorded when a PTY becomes a session.
@@ -457,6 +574,7 @@ impl SessionRegistry {
             git: None,
             git_at: 0,
             meter: crate::meter::Meter::default(),
+            metered_final: false,
         };
         let mut g = self.inner.lock().unwrap();
         // Instant-exit race: the waiter thread may have reported this PTY's
@@ -842,6 +960,7 @@ impl SessionRegistry {
             root: workspace_root.to_string(),
             sessions: snaps,
             collisions,
+            usage: g.usage_report(),
         }
     }
 
@@ -858,17 +977,43 @@ impl SessionRegistry {
     }
 
     /// Replace the registry with persisted history (all marked stale).
-    /// Live sessions are never resurrected from disk.
+    /// Live sessions are never resurrected from disk. Sessions archived
+    /// before the finalized counters existed fold their meter in once —
+    /// `metered_final` then travels with the archive so it never repeats.
     pub fn restore(&self, persisted: Vec<PersistedSession>) {
         let mut g = self.inner.lock().unwrap();
+        // `&mut Inner` lets the compiler see sessions/usage_finalized as
+        // disjoint field borrows inside the loop.
+        let g = &mut *g;
         for p in persisted.into_iter().take(MAX_PERSISTED) {
             let id = p.id.clone();
             if g.sessions.contains_key(&id) {
                 continue;
             }
             g.order.push(id.clone());
-            g.sessions.insert(id, AgentSession::from(p));
+            g.sessions.insert(id.clone(), AgentSession::from(p));
+            if let Some(s) = g.sessions.get_mut(&id) {
+                if !s.metered_final {
+                    s.metered_final = true;
+                    let agent = s.agent.clone();
+                    g.usage_finalized
+                        .entry(agent.clone())
+                        .or_default()
+                        .add(&agent, &s.meter);
+                }
+            }
         }
+    }
+
+    /// Finalized counters for persistence alongside the session archive.
+    pub fn usage_finalized(&self) -> HashMap<String, AgentUsage> {
+        self.inner.lock().unwrap().usage_finalized.clone()
+    }
+
+    /// Restore finalized counters. Must run BEFORE `restore` — archived
+    /// sessions flagged `metered_final` are already inside these counters.
+    pub fn restore_usage(&self, usage: HashMap<String, AgentUsage>) {
+        self.inner.lock().unwrap().usage_finalized = usage;
     }
 
     /// Sessions to persist: live + recent history, bounded.
@@ -1221,12 +1366,70 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             tokens_total: 0,
+            tokens_cached: 0,
             cost_usd: 0.0,
+            model: None,
+            metered_final: false,
         }]);
         let ev = reg.snapshot("C:/repo");
         assert_eq!(ev.sessions[0].state, "stale");
         assert!(ev.sessions[0].pty_id.is_none());
         assert!(ev.sessions[0].pid.is_none());
+    }
+
+    #[test]
+    fn usage_folds_once_and_counts_live_sessions() {
+        let reg = SessionRegistry::new();
+        // Pre-existing finalized counters (e.g. restored from disk).
+        reg.restore_usage(HashMap::from([(
+            "claude".into(),
+            AgentUsage {
+                sessions: 3,
+                tokens_in: 100,
+                tokens_out: 50,
+                tokens_total: 150,
+                tokens_cached: 0,
+                cost_usd: 1.0,
+                cost_estimated: 0.0,
+            },
+        )]));
+        // An archive entry already folded into the counters is not
+        // double-counted; one without the flag folds in exactly once.
+        let archived = |id: &str, metered_final: bool| PersistedSession {
+            id: id.into(),
+            label: "old".into(),
+            agent: "claude".into(),
+            program: Some("claude".into()),
+            args: vec![],
+            root: "C:/repo".into(),
+            rel_prefix: "".into(),
+            started_at: 1,
+            last_activity_at: 2,
+            ended_at: Some(3),
+            exit_code: Some(0),
+            touched: vec![],
+            commands: vec![],
+            tokens_in: 10,
+            tokens_out: 5,
+            tokens_total: 15,
+            tokens_cached: 0,
+            cost_usd: 0.5,
+            model: None,
+            metered_final,
+        };
+        reg.restore(vec![archived("a", true), archived("b", false)]);
+        let ev = reg.snapshot("C:/repo");
+        let u = &ev.usage.by_agent["claude"];
+        // finalized(3) + folded(b) + archived(a) skipped → 4 sessions
+        assert_eq!(u.sessions, 4);
+        assert_eq!(u.tokens_total, 165);
+        assert_eq!(u.cost_usd, 1.5);
+        assert_eq!(ev.usage.total.tokens_total, 165);
+        // Restoring the same archive again must not re-fold (id dedup +
+        // the metered_final flag are both in the way of double counting).
+        reg.restore(vec![archived("b", false)]);
+        let ev2 = reg.snapshot("C:/repo");
+        assert_eq!(ev2.usage.total.tokens_total, 165);
     }
 
     #[test]

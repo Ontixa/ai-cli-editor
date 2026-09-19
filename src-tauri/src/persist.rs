@@ -43,25 +43,40 @@ pub fn save(app_data: PathBuf, state: &Value) -> AppResult<()> {
     save_doc(&app_data, STATE_FILE, state)
 }
 
-/// Backend-owned session history. Versioned envelope so future migrations
-/// can detect shape changes; corrupt data degrades to empty history.
-pub fn load_sessions(app_data: &Path) -> Vec<crate::session::PersistedSession> {
+/// Backend-owned session history + all-time usage counters. Versioned
+/// envelope so future migrations can detect shape changes; corrupt data
+/// degrades to empty history. `usage` is a map of agent kind → counter
+/// and defaults to empty for archives written before it existed.
+pub fn load_sessions(
+    app_data: &Path,
+) -> (
+    Vec<crate::session::PersistedSession>,
+    std::collections::HashMap<String, crate::session::AgentUsage>,
+) {
     let Some(v) = load_doc(app_data, SESSIONS_FILE) else {
-        return Vec::new();
+        return (Vec::new(), Default::default());
     };
     if v.get("version").and_then(|x| x.as_u64()) != Some(2) {
-        return Vec::new();
+        return (Vec::new(), Default::default());
     }
-    v.get("sessions")
+    let sessions = v
+        .get("sessions")
         .cloned()
         .and_then(|s| serde_json::from_value(s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let usage = v
+        .get("usage")
+        .cloned()
+        .and_then(|u| serde_json::from_value(u).ok())
+        .unwrap_or_default();
+    (sessions, usage)
 }
 
 pub fn save_sessions(
     app_data: &Path,
     sessions: &[crate::session::PersistedSession],
+    usage: &std::collections::HashMap<String, crate::session::AgentUsage>,
 ) -> AppResult<()> {
-    let doc = serde_json::json!({ "version": 2, "sessions": sessions });
+    let doc = serde_json::json!({ "version": 2, "sessions": sessions, "usage": usage });
     save_doc(app_data, SESSIONS_FILE, &doc)
 }

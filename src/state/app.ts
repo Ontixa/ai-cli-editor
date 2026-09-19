@@ -9,6 +9,7 @@ import type {
   ReviewedFile,
   SearchMatch,
   UpdateState,
+  UsageReport,
   WorktreeInfo,
   WorkspaceInfo,
 } from "../lib/types";
@@ -172,6 +173,10 @@ export interface AppState {
   sessions: AgentSession[];
   /** Operational collision warnings derived from session activity. */
   collisions: Collision[];
+  /** All-time usage across all sessions ever metered (persisted
+   *  backend-side in sessions.json + live meters on top). Global —
+   *  not scoped to the active project. */
+  usage: UsageReport;
   /** Git worktrees under `.worktrees/` for agent isolation. */
   worktrees: WorktreeInfo[];
   /** Checkpoints stored in the repo's git dir. */
@@ -201,6 +206,19 @@ export interface AppState {
 }
 
 const EMPTY_GIT: GitStatus = { isRepo: false, branch: null, changes: [] };
+
+const EMPTY_USAGE: UsageReport = {
+  byAgent: {},
+  total: {
+    sessions: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+    tokensTotal: 0,
+    tokensCached: 0,
+    costUsd: 0,
+    costEstimated: 0,
+  },
+};
 
 export const initialState: AppState = {
   workspace: null,
@@ -234,6 +252,7 @@ export const initialState: AppState = {
   shellLabel: "terminal",
   sessions: [],
   collisions: [],
+  usage: EMPTY_USAGE,
   worktrees: [],
   checkpoints: [],
   review: {},

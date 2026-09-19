@@ -1200,6 +1200,23 @@ kbd {
   color: var(--green);
   border-color: rgba(126, 231, 135, 0.4);
 }
+.sess-tag.model {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  font-family: var(--font-mono);
+}
+.sess-tag.cache {
+  color: var(--fg-dim);
+  border-style: dashed;
+}
+.sess-tag.ctx {
+  color: var(--green);
+  border-color: rgba(126, 231, 135, 0.35);
+}
+.sess-tag.ctx.warn {
+  color: var(--yellow);
+  border-color: rgba(227, 179, 65, 0.5);
+}
 .usage-total {
   font-size: 10.5px;
   color: var(--accent);
@@ -1207,6 +1224,43 @@ kbd {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.usage-block {
+  margin: 4px 8px 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+.usage-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  text-transform: lowercase;
+  letter-spacing: 0.4px;
+}
+.usage-head .usage-total {
+  margin-left: 4px;
+  font-weight: 600;
+}
+.usage-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  padding: 2px 0 0;
+  color: var(--fg-dim);
+}
+.usage-row .usage-agent {
+  color: var(--fg);
+  min-width: 64px;
+}
+.usage-row .usage-tok {
+  color: var(--blue);
+}
+.usage-row .usage-cost {
+  color: var(--green);
 }
 .terminal-body {
   flex: 1;

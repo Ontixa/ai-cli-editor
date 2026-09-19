@@ -26,13 +26,18 @@ struct MeterUpdate {
     abs_in: Option<u64>,
     abs_out: Option<u64>,
     abs_total: Option<u64>,
+    abs_cached: Option<u64>,
     abs_cost: Option<f64>,
+    /// "model: gpt-5" style announcements — last one wins.
+    model: Option<String>,
+    /// "NN% context left" — latest value wins (it shrinks over time).
+    context_left_pct: Option<f64>,
 }
 
 /// Remove ANSI escape sequences so usage lines match their plain text.
 /// Handles CSI (`ESC [ ... letter`), OSC (`ESC ] ... BEL|ST`), and
-/// single-char sequences. Also drops `\r` isn't dropped — the meter splits
-/// on it; control chars other than printable text are skipped.
+/// single-char sequences. `\r`/`\n` are kept — the meter splits on them;
+/// other control chars are skipped.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
@@ -118,6 +123,45 @@ fn num_before(line: &str, word: &str) -> Option<u64> {
     int_at(bytes, end).map(|(v, _)| v).filter(|_| end < i)
 }
 
+/// Float appearing immediately BEFORE `word` (`78.5 %` → with word="%"
+/// yields 78.5).
+fn fnum_before(line: &str, word: &str) -> Option<f64> {
+    let pos = line.find(word)?;
+    let bytes = line.as_bytes();
+    let mut i = pos;
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    let mut end = i;
+    while end > 0 && matches!(bytes[end - 1], b'0'..=b'9' | b'.' | b',') {
+        end -= 1;
+    }
+    if end == i {
+        return None;
+    }
+    line[end..i].replace(',', "").parse().ok()
+}
+
+/// Identifier-ish word appearing AFTER `key` (`model: gpt-5-codex` →
+/// "gpt-5-codex"). Used for model names — requires at least one digit so
+/// prose like "model context" doesn't qualify.
+fn word_after_key(line: &str, key: &str) -> Option<String> {
+    let pos = line.find(key)? + key.len();
+    let bytes = line.as_bytes();
+    let mut i = pos;
+    while i < bytes.len() && matches!(bytes[i], b':' | b'=' | b' ' | b'\t' | b'"' | b'\'') {
+        i += 1;
+    }
+    let start = i;
+    while i < bytes.len()
+        && matches!(bytes[i], b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/')
+    {
+        i += 1;
+    }
+    let w = &line[start..i];
+    (w.len() >= 3 && w.bytes().any(|b| b.is_ascii_digit())).then(|| w.to_string())
+}
+
 /// Dollar amounts (`$1.23`) at or after `from` in `line`.
 fn money_values(line: &str, from: usize) -> Vec<f64> {
     let bytes = line.as_bytes();
@@ -147,7 +191,11 @@ fn money_values(line: &str, from: usize) -> Vec<f64> {
 /// Scan one stripped, lowercased line for usage reports.
 fn scan_line(line: &str) -> MeterUpdate {
     let mut u = MeterUpdate::default();
-    if !line.contains("token") && !line.contains("cost") {
+    if !line.contains("token")
+        && !line.contains("cost")
+        && !line.contains("model")
+        && !line.contains("context")
+    {
         return u;
     }
 
@@ -170,6 +218,16 @@ fn scan_line(line: &str) -> MeterUpdate {
         .or_else(|| num_after_key(line, "tokens used"))
         .or_else(|| num_after_key(line, "tokens_used"));
 
+    // Prompt-cache reads (claude /cost, gemini /stats show these). Long
+    // keys first — "cache read tokens   N" has a word between key and
+    // value that the bare "cache read" key can't skip.
+    u.abs_cached = num_after_key(line, "cache read tokens")
+        .or_else(|| num_after_key(line, "cached tokens"))
+        .or_else(|| num_after_key(line, "cached_tokens"))
+        .or_else(|| num_after_key(line, "cache creation tokens"))
+        .or_else(|| num_after_key(line, "cache read"))
+        .or_else(|| num_after_key(line, "cache creation"));
+
     // Fallback: a bare "N tokens" count (claude status line) — only when no
     // keyed field matched, so "12 input tokens" doesn't double-count.
     if u.abs_in.is_none() && u.abs_out.is_none() && u.abs_total.is_none() && u.delta_in == 0 {
@@ -177,6 +235,15 @@ fn scan_line(line: &str) -> MeterUpdate {
             u.abs_total = Some(v);
         }
     }
+
+    // "NN% context left" (codex TUI footer) — requires both words so
+    // unrelated percentages don't leak in.
+    if line.contains("context") && line.contains("left") && line.contains('%') {
+        u.context_left_pct = fnum_before(line, "%");
+    }
+
+    // Model announcement: "model: gpt-5-codex", "model = claude-sonnet-4-5".
+    u.model = word_after_key(line, "model:").or_else(|| word_after_key(line, "model ="));
 
     // Cost: aider prints "$0.05 message, $0.42 session" → take the session
     // total (the LAST amount); a plain "total cost: $1.23" → first amount.
@@ -210,21 +277,40 @@ pub struct Meter {
     pub tokens_out: u64,
     #[serde(default)]
     pub tokens_total: u64,
+    /// Prompt-cache read/creation tokens the CLI reported.
+    #[serde(default)]
+    pub tokens_cached: u64,
     /// Cost the CLI itself reported (cumulative USD). Estimates live in a
     /// separate snapshot field — this one is always the real figure.
     #[serde(default)]
     pub cost_usd: f64,
+    /// Model identifier the CLI announced ("model: gpt-5-codex").
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Latest "context left" percentage (0..100) the CLI reported.
+    #[serde(default)]
+    pub context_left_pct: Option<f64>,
 }
 
 impl Meter {
     /// Rebuild from persisted totals (the line buffer is not persisted).
-    pub fn with_totals(tokens_in: u64, tokens_out: u64, tokens_total: u64, cost_usd: f64) -> Self {
+    pub fn with_totals(
+        tokens_in: u64,
+        tokens_out: u64,
+        tokens_total: u64,
+        tokens_cached: u64,
+        cost_usd: f64,
+        model: Option<String>,
+    ) -> Self {
         Meter {
             buf: String::new(),
             tokens_in,
             tokens_out,
             tokens_total,
+            tokens_cached,
             cost_usd,
+            model,
+            context_left_pct: None,
         }
     }
 
@@ -265,6 +351,7 @@ impl Meter {
             (&mut self.tokens_in, u.abs_in),
             (&mut self.tokens_out, u.abs_out),
             (&mut self.tokens_total, u.abs_total),
+            (&mut self.tokens_cached, u.abs_cached),
         ] {
             if let Some(v) = v {
                 if v > *slot {
@@ -278,6 +365,18 @@ impl Meter {
                 self.cost_usd = c;
                 changed = true;
             }
+        }
+        if let Some(m) = &u.model {
+            if self.model.as_deref() != Some(m.as_str()) {
+                self.model = Some(m.clone());
+                changed = true;
+            }
+        }
+        // Context-left is a gauge, not a counter — latest wins, it is
+        // expected to shrink as the session fills its window.
+        if u.context_left_pct.is_some() && u.context_left_pct != self.context_left_pct {
+            self.context_left_pct = u.context_left_pct;
+            changed = true;
         }
         changed
     }
@@ -390,12 +489,30 @@ mod tests {
 
     #[test]
     fn estimate_only_when_no_reported_cost() {
-        let mut m = Meter::with_totals(1_000_000, 100_000, 0, 0.0);
+        let mut m = Meter::with_totals(1_000_000, 100_000, 0, 0, 0.0, None);
         let est = m.estimated_cost("claude").unwrap();
         assert!((est - (3.0 + 1.5)).abs() < 1e-9);
         m.cost_usd = 0.5;
         assert_eq!(m.estimated_cost("claude"), None);
         assert_eq!(m.estimated_cost("aider"), None); // no price entry
+    }
+
+    #[test]
+    fn model_context_and_cache_lines() {
+        let mut m = Meter::default();
+        m.feed("model: gpt-5-codex\n");
+        assert_eq!(m.model.as_deref(), Some("gpt-5-codex"));
+        m.feed("████ 78.5% context left\n");
+        assert_eq!(m.context_left_pct, Some(78.5));
+        // Gauge follows the LATEST value, not the max.
+        m.feed("█ 42% context left\n");
+        assert_eq!(m.context_left_pct, Some(42.0));
+        m.feed("  Cache read tokens               88,001\n");
+        assert_eq!(m.tokens_cached, 88_001);
+        // Prose lookalikes don't parse.
+        let mut m2 = Meter::default();
+        m2.feed("the model context is large\nmodel = latest\n");
+        assert_eq!(m2.model, None);
     }
 
     #[test]

@@ -31,6 +31,7 @@ import type {
   FsBatch,
   FsChange,
   RestorePlan,
+  UsageReport,
   WorkspaceInfo,
 } from "../lib/types";
 
@@ -1249,15 +1250,22 @@ function applySessions(ev: {
   root: string;
   sessions: AgentSession[];
   collisions: AppState["collisions"];
+  usage: UsageReport;
 }) {
   const s = store.get();
+  // Usage is global (same payload on every event) — always updated,
+  // even when the session list lands on a background project's snapshot.
   if (ev.root === s.workspace?.root) {
-    store.set({ sessions: ev.sessions, collisions: ev.collisions });
+    store.set({ sessions: ev.sessions, collisions: ev.collisions, usage: ev.usage });
     return;
   }
   const snap = s.projectData[ev.root];
-  if (!snap) return; // closed or unknown project
+  if (!snap) {
+    store.set({ usage: ev.usage });
+    return; // closed or unknown project
+  }
   store.set({
+    usage: ev.usage,
     projectData: {
       ...s.projectData,
       [ev.root]: { ...snap, sessions: ev.sessions, collisions: ev.collisions },

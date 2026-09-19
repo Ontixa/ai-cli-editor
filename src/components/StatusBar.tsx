@@ -1,7 +1,7 @@
 import { store } from "../state/app";
 import { useStore, shallow } from "../lib/store";
 import { dismissUpdate, installUpdate, setSidebarTab } from "../state/actions";
-import { usageTotals, fmtTokens, fmtCost } from "../lib/agents";
+import { usageTotals, usageTokens, usageCostLabel, fmtTokens, fmtCost } from "../lib/agents";
 import pkg from "../../package.json";
 
 function UpdateItem() {
@@ -73,6 +73,25 @@ function UsageItem() {
   );
 }
 
+/** All-time usage across every metered session ever — persisted
+ *  backend-side, survives restarts. Click opens Agents. */
+function AllTimeUsageItem() {
+  const usage = useStore(store, (s) => s.usage);
+  const tokens = usageTokens(usage.total);
+  const cost = usageCostLabel(usage.total);
+  if (usage.total.sessions === 0 || (tokens === 0 && !cost)) return null;
+  return (
+    <span
+      className="status-item clickable"
+      title={`all-time usage — ${usage.total.sessions} metered session(s), every project`}
+      onClick={() => setSidebarTab("agents")}
+    >
+      Σ {fmtTokens(tokens)}
+      {cost ? ` · ${cost}` : ""}
+    </span>
+  );
+}
+
 export function StatusBar() {
   const git = useStore(store, (s) => s.git);
   const follow = useStore(store, (s) => s.followAgent);
@@ -102,6 +121,7 @@ export function StatusBar() {
         {follow && <span className="status-item accent">follow</span>}
         {searchRunning && <span className="status-item dim">searching… {searchCount}</span>}
         <UsageItem />
+        <AllTimeUsageItem />
         <UpdateItem />
       </div>
       <div className="statusbar-right">

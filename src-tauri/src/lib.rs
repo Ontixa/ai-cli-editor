@@ -146,7 +146,11 @@ fn persist_sessions(app: &AppHandle, force: bool) {
     }
     let dir = st.app_data.lock().unwrap().clone();
     if let Some(dir) = dir {
-        let _ = persist::save_sessions(&dir, &st.sessions.persisted());
+        let _ = persist::save_sessions(
+            &dir,
+            &st.sessions.persisted(),
+            &st.sessions.usage_finalized(),
+        );
     }
 }
 
@@ -843,7 +847,11 @@ pub fn run() {
             let st = app.state::<AppState>();
             if let Ok(dir) = app.path().app_data_dir() {
                 *st.app_data.lock().unwrap() = Some(dir.clone());
-                st.sessions.restore(persist::load_sessions(&dir));
+                // Usage counters first: restored sessions flagged as
+                // already-counted must find them in place.
+                let (sessions, usage) = persist::load_sessions(&dir);
+                st.sessions.restore_usage(usage);
+                st.sessions.restore(sessions);
             }
             Ok(())
         })

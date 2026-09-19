@@ -8,9 +8,14 @@ import {
   sessionCost,
   fmtTokens,
   fmtCost,
+  fmtPct,
   usageTotals,
+  usageAgents,
+  usageTokens,
+  usageCost,
+  usageCostLabel,
 } from "./agents";
-import type { AgentSession, Collision } from "./types";
+import type { AgentSession, AgentUsage, Collision } from "./types";
 
 function sess(over: Partial<AgentSession>): AgentSession {
   return {
@@ -31,6 +36,20 @@ function sess(over: Partial<AgentSession>): AgentSession {
     tokensIn: 0,
     tokensOut: 0,
     tokensTotal: 0,
+    tokensCached: 0,
+    costUsd: 0,
+    costEstimated: 0,
+    ...over,
+  };
+}
+
+function usage(over: Partial<AgentUsage>): AgentUsage {
+  return {
+    sessions: 1,
+    tokensIn: 0,
+    tokensOut: 0,
+    tokensTotal: 0,
+    tokensCached: 0,
     costUsd: 0,
     costEstimated: 0,
     ...over,
@@ -135,6 +154,34 @@ describe("usage helpers", () => {
     expect(t.tokens).toBe(160);
     expect(t.costUsd).toBeCloseTo(0.5);
     expect(t.costEstimated).toBeCloseTo(0.06);
+  });
+
+  it("all-time usage helpers aggregate and format", () => {
+    // usageTokens prefers the explicit total, else in+out
+    expect(usageTokens(usage({ tokensTotal: 500, tokensIn: 100, tokensOut: 50 }))).toBe(500);
+    expect(usageTokens(usage({ tokensIn: 100, tokensOut: 50 }))).toBe(150);
+    // usageCost: reported wins, estimate only when nothing reported
+    expect(usageCost(usage({ costUsd: 1.2, costEstimated: 3 }))).toEqual({
+      usd: 1.2,
+      estimated: false,
+    });
+    expect(usageCost(usage({ costEstimated: 0.3 }))).toEqual({ usd: 0.3, estimated: true });
+    expect(usageCost(usage({}))).toBeNull();
+    // usageCostLabel joins both when a counter mixes reported+estimated
+    expect(usageCostLabel(usage({ costUsd: 1.2, costEstimated: 0.3 }))).toBe("$1.20+≈$0.30");
+    expect(usageCostLabel(usage({ costUsd: 1.2 }))).toBe("$1.20");
+    expect(usageCostLabel(usage({}))).toBeNull();
+    // fmtPct clamps and rounds
+    expect(fmtPct(78.5)).toBe("79%");
+    expect(fmtPct(-3)).toBe("0%");
+    expect(fmtPct(120)).toBe("100%");
+    // usageAgents sorts by tokens desc
+    const by = {
+      a: usage({ tokensTotal: 10 }),
+      b: usage({ tokensTotal: 900 }),
+      c: usage({ tokensIn: 300, tokensOut: 300 }),
+    };
+    expect(usageAgents(by)).toEqual(["b", "c", "a"]);
   });
 });
 

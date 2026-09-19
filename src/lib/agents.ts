@@ -1,4 +1,4 @@
-import type { AgentSession, Collision } from "./types";
+import type { AgentSession, AgentUsage, Collision } from "./types";
 
 /** Display names for detected agent kinds (backend `agent_kind`). */
 export const AGENT_NAMES: Record<string, string> = {
@@ -97,4 +97,37 @@ export function usageTotals(sessions: AgentSession[]): {
     costEstimated += s.costUsd > 0 ? 0 : s.costEstimated;
   }
   return { tokens, costUsd, costEstimated };
+}
+
+/** Best total for a usage counter: explicit total, else in+out. */
+export function usageTokens(u: AgentUsage): number {
+  return Math.max(u.tokensTotal, u.tokensIn + u.tokensOut);
+}
+
+/** Cost of a usage counter — same honest split as sessionCost. */
+export function usageCost(u: AgentUsage): { usd: number; estimated: boolean } | null {
+  if (u.costUsd > 0) return { usd: u.costUsd, estimated: false };
+  if (u.costEstimated > 0) return { usd: u.costEstimated, estimated: true };
+  return null;
+}
+
+/** Combined label for a counter that may hold BOTH reported and
+ *  estimated dollars (some sessions reported cost, others didn't):
+ *  `$1.20+≈$0.30`. Null when nothing was priced. */
+export function usageCostLabel(u: AgentUsage): string | null {
+  const parts = [
+    u.costUsd > 0 ? fmtCost(u.costUsd, false) : "",
+    u.costEstimated > 0 ? fmtCost(u.costEstimated, true) : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join("+") : null;
+}
+
+/** Compact "78%" context-left label (rounded, clamped). */
+export function fmtPct(pct: number): string {
+  return `${Math.max(0, Math.min(100, Math.round(pct)))}%`;
+}
+
+/** Agent ids with usage, sorted by total tokens desc for stable display. */
+export function usageAgents(byAgent: Record<string, AgentUsage>): string[] {
+  return Object.keys(byAgent).sort((a, b) => usageTokens(byAgent[b]) - usageTokens(byAgent[a]));
 }
