@@ -1,6 +1,6 @@
 [package]
 name = "ai-cli-editor"
-version = "0.2.0"
+version = "0.3.0"
 description = "The control plane, cockpit, and review surface for terminal-native coding agents."
 authors = ["AI CLI Editor contributors"]
 license = "Apache-2.0"

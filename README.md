@@ -72,8 +72,15 @@ tree, a real diff — and stays fast and stable through long agent sessions.
   `sessions.json`; dead processes are shown as history, never resurrected.
 - **Real PTY terminals** — multiple sessions, PowerShell/cmd on Windows,
   bash/zsh on macOS/Linux. Runs `codex`, `claude`, `devin`, `gemini`,
-  `opencode`, `aider`, and any other CLI. Detected agents get one-click
-  launch buttons.
+  `opencode`, `aider`, `amp`, `qwen`, `crush`, `copilot`, and any other
+  CLI. Detected agents get one-click launch buttons; missing ones get a
+  one-click install chip (always confirmation-first, run in the open).
+- **Token & cost metering** — the session registry scans PTY output for
+  the usage reports each CLI prints (aider's sent/received + session
+  cost, codex's `tokens used`, Claude's `/cost` table, Gemini's `/stats`)
+  and shows per-session and per-project token counts with reported cost —
+  or a clearly-marked `≈` estimate from a static price table when the CLI
+  reports tokens but no price. Metered usage persists in session history.
 - **Live file watching** — creations, edits, deletes and renames land in the
   tree, the Changes panel, Agent Activity, and session attribution the
   moment they happen.
@@ -165,8 +172,12 @@ Shortcuts pass through to the shell while the terminal has focus (so
 
 Anything that runs in a terminal. Detected automatically for quick-launch
 and session labeling: Codex CLI, Claude Code, Devin CLI, Gemini CLI,
-OpenCode, Aider. Unknown programs get generic session tracking — absence of
-any of them is fine, a plain shell is always available.
+OpenCode, Aider, Amp, Qwen Code, Crush, GitHub Copilot. CLIs not on PATH
+show an install chip — one click opens a confirmation dialog, then types
+the documented package-manager command into a fresh terminal where the
+whole install runs visibly. Unknown programs get generic session
+tracking — absence of all of them is fine, a plain shell is always
+available.
 
 ## Architecture
 

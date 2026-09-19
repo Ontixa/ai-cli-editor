@@ -47,11 +47,15 @@ export interface TerminalSession {
   ptyId?: number;
   label: string;
   exited: boolean;
+  /** Canonical root of the owning project. */
+  wsRoot: string;
   /** Pending launch spec for command sessions (e.g. `codex`). */
   program?: string;
   args?: string[];
   /** Workspace-relative working dir — set for worktree sessions. */
   cwd?: string;
+  /** Command typed into the shell right after spawn (confirmed installs). */
+  initCmd?: string;
 }
 
 export interface SearchUiState {
@@ -62,9 +66,64 @@ export interface SearchUiState {
   truncated: boolean;
 }
 
+/** An open project tab (browser-tab semantics). */
+export interface ProjectTab {
+  root: string;
+  name: string;
+}
+
+/**
+ * Everything that belongs to one project. The flat fields on AppState are
+ * the ACTIVE project's live values; switching tabs swaps them with the
+ * stored snapshot so background projects keep their state (open tabs,
+ * terminals, git status, undo history) intact.
+ */
+export interface ProjectSnapshot {
+  workspace: WorkspaceInfo;
+  tabs: Tab[];
+  activeTab: string | null;
+  docs: Record<string, DocMeta>;
+  expanded: Record<string, boolean>;
+  dirInvalidations: Record<string, number>;
+  revealRequest: { path: string; ts: number } | null;
+  git: GitStatus;
+  activity: ActivityItem[];
+  followBurst: number;
+  terminals: TerminalSession[];
+  activeTerminal: number | null;
+  sessions: AgentSession[];
+  collisions: Collision[];
+  worktrees: WorktreeInfo[];
+  checkpoints: CheckpointMeta[];
+  review: Record<string, ReviewedFile>;
+  fileIndex: string[] | null;
+  fileIndexTruncated: boolean;
+  search: SearchUiState;
+  cursor: { line: number; col: number } | null;
+}
+
+/** Global confirm dialog (unsaved-changes flows etc.). A button without
+ *  `onPick` just closes. */
+export interface ConfirmButton {
+  label: string;
+  kind?: "primary" | "danger";
+  onPick?: () => void;
+}
+export interface ConfirmState {
+  title: string;
+  message: string;
+  buttons: ConfirmButton[];
+}
+
 export interface AppState {
+  /** Active project — mirrors the matching entry in `projects`. */
   workspace: WorkspaceInfo | null;
   workspaceError: string | null;
+
+  /** Open project tabs, in display order. */
+  projects: ProjectTab[];
+  /** Per-project snapshots for every project EXCEPT the active one. */
+  projectData: Record<string, ProjectSnapshot>;
 
   sidebarVisible: boolean;
   sidebarTab: SidebarTab;
@@ -127,6 +186,11 @@ export interface AppState {
   paletteOpen: boolean;
   search: SearchUiState;
   recentFiles: string[];
+  /** Recently opened project roots, most-recent-first (welcome screen). */
+  recentProjects: string[];
+
+  /** Modal confirm request (unsaved changes on close flows). */
+  confirm: ConfirmState | null;
 
   /** Timestamp of last intentional user action; Follow Agent won't steal
    *  focus within a few seconds of it. */
@@ -141,6 +205,8 @@ const EMPTY_GIT: GitStatus = { isRepo: false, branch: null, changes: [] };
 export const initialState: AppState = {
   workspace: null,
   workspaceError: null,
+  projects: [],
+  projectData: {},
   sidebarVisible: true,
   sidebarTab: "files",
   sidebarWidth: 264,
@@ -177,6 +243,8 @@ export const initialState: AppState = {
   paletteOpen: false,
   search: { id: 0, query: "", matches: [], running: false, truncated: false },
   recentFiles: [],
+  recentProjects: [],
+  confirm: null,
   lastUserAction: 0,
 
   update: null,

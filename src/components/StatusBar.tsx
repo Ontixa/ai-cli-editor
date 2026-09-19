@@ -1,6 +1,7 @@
 import { store } from "../state/app";
-import { useStore } from "../lib/store";
-import { dismissUpdate, installUpdate } from "../state/actions";
+import { useStore, shallow } from "../lib/store";
+import { dismissUpdate, installUpdate, setSidebarTab } from "../state/actions";
+import { usageTotals, fmtTokens, fmtCost } from "../lib/agents";
 
 function UpdateItem() {
   const update = useStore(store, (s) => s.update);
@@ -45,6 +46,32 @@ function UpdateItem() {
   );
 }
 
+/** Aggregate token/cost for the active project — click opens Agents. */
+function UsageItem() {
+  const sessions = useStore(store, (s) => s.sessions, shallow);
+  const t = usageTotals(sessions);
+  const cost = t.costUsd + t.costEstimated;
+  if (t.tokens === 0 && cost === 0) return null;
+  const costText =
+    cost > 0
+      ? ` · ${
+          t.costUsd > 0 ? fmtCost(t.costUsd, false) : ""
+        }${t.costEstimated > 0 ? (t.costUsd > 0 ? "+" : "") + fmtCost(t.costEstimated, true) : ""}`
+      : "";
+  return (
+    <span
+      className="status-item accent clickable"
+      title={`tokens used this project${
+        t.costEstimated > 0 ? " — includes ≈ estimates" : " — reported by CLIs"
+      }`}
+      onClick={() => setSidebarTab("agents")}
+    >
+      ⭑ {fmtTokens(t.tokens)}
+      {costText}
+    </span>
+  );
+}
+
 export function StatusBar() {
   const git = useStore(store, (s) => s.git);
   const follow = useStore(store, (s) => s.followAgent);
@@ -73,6 +100,7 @@ export function StatusBar() {
         )}
         {follow && <span className="status-item accent">follow</span>}
         {searchRunning && <span className="status-item dim">searching… {searchCount}</span>}
+        <UsageItem />
         <UpdateItem />
       </div>
       <div className="statusbar-right">

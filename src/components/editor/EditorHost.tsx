@@ -10,6 +10,8 @@ const listenerApplied = new WeakSet<EditorView>();
 /**
  * Host element for a CodeMirror doc. Loads the doc if needed, attaches the
  * view, detaches on unmount (state is preserved by editorManager).
+ * Docs are scoped by workspace root so identical paths in different
+ * project tabs never share editor state.
  */
 export function EditorHost({ path }: { path: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -17,19 +19,23 @@ export function EditorHost({ path }: { path: string }) {
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    const root = store.get().workspace?.root;
+    if (!root) return;
     let view: EditorView | null = null;
     let cancelled = false;
 
     const attach = async () => {
-      await editorManager.loadDoc(path);
+      await editorManager.loadDoc(root, path);
       if (cancelled) return;
-      view = editorManager.attach(path, host);
+      view = editorManager.attach(root, path, host);
       if (!view) return;
       if (!listenerApplied.has(view)) {
         listenerApplied.add(view);
         view.dispatch({
           effects: StateEffect.appendConfig.of([
             EditorView.updateListener.of((u) => {
+              // Only mutate state while this project is still active.
+              if (store.get().workspace?.root !== root) return;
               if (u.docChanged) markDocDirty(path, true);
               if (u.selectionSet) {
                 const head = u.state.selection.main.head;
@@ -45,12 +51,12 @@ export function EditorHost({ path }: { path: string }) {
       }
       // Sync read-only state with current editable flag.
       const doc = store.get().docs[path];
-      if (doc) editorManager.setEditable(path, doc.editable);
+      if (doc) editorManager.setEditable(root, path, doc.editable);
     };
     void attach();
     return () => {
       cancelled = true;
-      editorManager.detach(path);
+      editorManager.detach(root, path);
     };
   }, [path]);
 

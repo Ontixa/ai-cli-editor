@@ -8,6 +8,7 @@ pub mod error;
 pub mod fs_ops;
 pub mod git;
 pub mod index;
+pub mod meter;
 pub mod paths;
 pub mod persist;
 pub mod platform;
@@ -19,17 +20,28 @@ pub mod session;
 pub mod watcher;
 pub mod worktree;
 
+use base64::Engine;
 use error::{AppError, AppResult};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// Per-workspace runtime. The watcher keeps running while the project is
+/// open so background project tabs keep tracking fs changes; the index is
+/// shared only within its own workspace.
+struct WsEntry {
+    _watcher: watcher::FsWatcher,
+    index: Arc<index::FileIndex>,
+}
+
 pub struct AppState {
+    /// Active workspace — all fs/git/search commands resolve against it.
     root: Mutex<Option<PathBuf>>,
-    index: index::FileIndex,
-    watcher: Mutex<Option<watcher::FsWatcher>>,
+    /// Open workspaces keyed by canonical root (project tabs).
+    workspaces: Mutex<HashMap<PathBuf, WsEntry>>,
     ptys: pty::PtyRegistry,
     search: search::SearchRegistry,
     sessions: session::SessionRegistry,
@@ -37,8 +49,8 @@ pub struct AppState {
     /// App data dir for backend-owned persistence (sessions.json).
     app_data: Mutex<Option<PathBuf>>,
     /// Emit/persist throttles — PTY output is chatty, so session updates
-    /// driven by it are rate-limited.
-    last_session_emit: Mutex<Instant>,
+    /// driven by it are rate-limited per workspace root.
+    last_session_emit: Mutex<HashMap<PathBuf, Instant>>,
     last_session_save: Mutex<Instant>,
 }
 
@@ -46,14 +58,13 @@ impl AppState {
     fn new() -> Self {
         Self {
             root: Mutex::new(None),
-            index: index::FileIndex::new(),
-            watcher: Mutex::new(None),
+            workspaces: Mutex::new(HashMap::new()),
             ptys: pty::PtyRegistry::new(),
             search: search::SearchRegistry::new(),
             sessions: session::SessionRegistry::new(),
             procmon: Mutex::new(None),
             app_data: Mutex::new(None),
-            last_session_emit: Mutex::new(Instant::now() - std::time::Duration::from_secs(60)),
+            last_session_emit: Mutex::new(HashMap::new()),
             last_session_save: Mutex::new(Instant::now() - std::time::Duration::from_secs(60)),
         }
     }
@@ -67,23 +78,59 @@ impl AppState {
     }
 }
 
-/// Push the current session snapshot to the frontend, honoring a minimum
+/// Resolve a frontend-supplied workspace path to a canonical root key.
+/// Falls back to normalized-string matching so `close_workspace` still
+/// works after the directory was deleted (canonicalize requires the dir
+/// to exist).
+fn workspace_key(state: &AppState, path: &str) -> Option<PathBuf> {
+    if let Ok(root) = paths::canonical_root(path) {
+        if state.workspaces.lock().unwrap().contains_key(&root) {
+            return Some(root);
+        }
+        // Canonical but not registered — the caller passed a path form
+        // we haven't seen; fall through to normalized matching.
+    }
+    let norm = paths::normalize(path);
+    state
+        .workspaces
+        .lock()
+        .unwrap()
+        .keys()
+        .find(|k| paths::normalize(&k.to_string_lossy()) == norm)
+        .cloned()
+}
+
+/// Push the session snapshot for one workspace, honoring a minimum
 /// interval unless `force` (spawn/exit/rename always go through).
-fn emit_sessions(app: &AppHandle, force: bool) {
+fn emit_sessions(app: &AppHandle, root: &Path, force: bool) {
     let st = app.state::<AppState>();
     {
-        let mut last = st.last_session_emit.lock().unwrap();
+        let mut map = st.last_session_emit.lock().unwrap();
+        let last = map
+            .entry(root.to_path_buf())
+            .or_insert_with(|| Instant::now() - std::time::Duration::from_secs(60));
         if !force && last.elapsed() < std::time::Duration::from_millis(800) {
             return;
         }
         *last = Instant::now();
     }
-    let root = st.root.lock().unwrap().clone();
-    if let Some(root) = root {
-        let ev = st
-            .sessions
-            .snapshot(&crate::paths::normalize(&root.to_string_lossy()));
-        let _ = app.emit("session:update", &ev);
+    let ev = st.sessions.snapshot(&root.to_string_lossy());
+    let _ = app.emit("session:update", &ev);
+}
+
+/// Emit a fresh snapshot for every open workspace — used by the process
+/// monitor, which has no single-root context.
+fn emit_sessions_all(app: &AppHandle, force: bool) {
+    let roots: Vec<PathBuf> = app
+        .state::<AppState>()
+        .workspaces
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    for root in roots {
+        emit_sessions(app, &root, force);
     }
 }
 
@@ -120,65 +167,131 @@ fn open_workspace(
 ) -> AppResult<WorkspaceInfo> {
     let root = paths::canonical_root(&path)?;
 
-    // Stop previous workspace state. Live sessions are detached (their
-    // PTYs die with kill_all); history is kept for the session list.
-    state.watcher.lock().unwrap().take();
-    state.ptys.kill_all();
-    state.sessions.detach_all();
-    state.search.cancel();
-    state.index.reset();
-
-    // Process monitor starts lazily on first workspace open — one thread
-    // for the app's lifetime, idles when no live sessions exist.
-    {
-        let mut pm = state.procmon.lock().unwrap();
-        if pm.is_none() {
-            let emit_app = app.clone();
-            *pm = Some(procmon::start(
-                state.sessions.clone(),
-                Arc::new(move || {
-                    emit_sessions(&emit_app, false);
-                }),
-            ));
-        }
-    }
-
-    let emit_app = app.clone();
-    let emit = Arc::new(move |changes: Vec<watcher::FsChange>| {
-        let _ = emit_app.emit("fs:batch", &changes);
-        let _ = emit_app.emit("git:stale", serde_json::Value::Null);
-    });
-
-    // Index + session hook: keep the quick-open index fresh and attribute
-    // fs activity to agent sessions without extra IPC traffic.
-    let hook_app = app.clone();
-    let hook: watcher::BatchHook = Arc::new(move |changes| {
-        let st = hook_app.state::<AppState>();
-        st.index.apply(changes);
-        let mut mutated = st.sessions.note_fs_changes(changes);
-        for sid in st.sessions.refresh_git_for_paths(changes) {
-            if st.sessions.refresh_git(&sid, false) {
-                mutated = true;
+    // First open of this root: install its watcher + index. Already-open
+    // workspaces fall through to the activation below — their terminals,
+    // sessions, and watcher keep running like background browser tabs.
+    if !state.workspaces.lock().unwrap().contains_key(&root) {
+        // Process monitor starts lazily on first workspace open — one
+        // thread for the app's lifetime, idles when no live sessions exist.
+        {
+            let mut pm = state.procmon.lock().unwrap();
+            if pm.is_none() {
+                let emit_app = app.clone();
+                *pm = Some(procmon::start(
+                    state.sessions.clone(),
+                    Arc::new(move || {
+                        emit_sessions_all(&emit_app, false);
+                    }),
+                ));
             }
         }
-        if mutated {
-            emit_sessions(&hook_app, false);
-            persist_sessions(&hook_app, false);
-        }
-    });
 
-    let w = watcher::start(root.clone(), emit, Some(hook))
-        .map_err(|e| AppError::Internal(format!("watcher failed: {e}")))?;
-    *state.watcher.lock().unwrap() = Some(w);
+        // Events are tagged with their workspace root so the frontend can
+        // route each batch to the right project tab.
+        let emit_app = app.clone();
+        let emit_root = root.clone();
+        let emit = Arc::new(move |changes: Vec<watcher::FsChange>| {
+            let _ = emit_app.emit(
+                "fs:batch",
+                &serde_json::json!({
+                    "root": emit_root.to_string_lossy(),
+                    "changes": changes,
+                }),
+            );
+            let _ = emit_app.emit(
+                "git:stale",
+                &serde_json::json!({ "root": emit_root.to_string_lossy() }),
+            );
+        });
+
+        // Index + session hook, scoped to this workspace's root so file
+        // touches never leak across projects.
+        let hook_app = app.clone();
+        let hook_root = root.clone();
+        let hook: watcher::BatchHook = Arc::new(move |changes| {
+            let st = hook_app.state::<AppState>();
+            {
+                let ws = st.workspaces.lock().unwrap();
+                if let Some(entry) = ws.get(&hook_root) {
+                    entry.index.apply(changes);
+                }
+            }
+            let root_str = hook_root.to_string_lossy().to_string();
+            let mut mutated = st.sessions.note_fs_changes(&root_str, changes);
+            for sid in st.sessions.refresh_git_for_paths(&root_str, changes) {
+                if st.sessions.refresh_git(&sid, false) {
+                    mutated = true;
+                }
+            }
+            if mutated {
+                emit_sessions(&hook_app, &hook_root, false);
+                persist_sessions(&hook_app, false);
+            }
+        });
+
+        let w = watcher::start(root.clone(), emit, Some(hook))
+            .map_err(|e| AppError::Internal(format!("watcher failed: {e}")))?;
+        state.workspaces.lock().unwrap().insert(
+            root.clone(),
+            WsEntry {
+                _watcher: w,
+                index: Arc::new(index::FileIndex::new()),
+            },
+        );
+    }
+
     *state.root.lock().unwrap() = Some(root.clone());
-
+    // A streamed search belongs to the workspace that started it —
+    // activating a project abandons any in-flight search.
+    state.search.cancel();
     // Frontend learns current sessions (incl. restored history) once.
-    emit_sessions(&app, true);
+    emit_sessions(&app, &root, true);
 
     Ok(WorkspaceInfo {
         root: root.to_string_lossy().to_string(),
         name: paths::dir_name(&root),
     })
+}
+
+/// Switch the active workspace to an already-open root (project tabs).
+#[tauri::command]
+fn activate_workspace(
+    app: AppHandle,
+    state: State<AppState>,
+    path: String,
+) -> AppResult<WorkspaceInfo> {
+    let root = workspace_key(&state, &path)
+        .ok_or_else(|| AppError::NotFound(format!("workspace not open: {path}")))?;
+    *state.root.lock().unwrap() = Some(root.clone());
+    state.search.cancel();
+    emit_sessions(&app, &root, true);
+    Ok(WorkspaceInfo {
+        root: root.to_string_lossy().to_string(),
+        name: paths::dir_name(&root),
+    })
+}
+
+/// Close a project tab: drop its watcher, kill its PTYs, and retire its
+/// sessions. Other workspaces keep running untouched.
+#[tauri::command]
+fn close_workspace(app: AppHandle, state: State<AppState>, path: String) -> AppResult<()> {
+    let Some(root) = workspace_key(&state, &path) else {
+        return Ok(()); // already closed — nothing to do
+    };
+    state.workspaces.lock().unwrap().remove(&root); // dropping stops the watcher
+    state.last_session_emit.lock().unwrap().remove(&root);
+    state.search.cancel();
+
+    let norm = root.to_string_lossy().to_string();
+    for pty_id in state.sessions.detach_root(&norm) {
+        let _ = state.ptys.kill(pty_id);
+    }
+    if state.root.lock().unwrap().as_ref() == Some(&root) {
+        *state.root.lock().unwrap() = None;
+    }
+    emit_sessions(&app, &root, true);
+    persist_sessions(&app, true);
+    Ok(())
 }
 
 #[tauri::command]
@@ -265,7 +378,15 @@ fn resolve_link_target(
 
 #[tauri::command]
 fn list_all_files(state: State<AppState>) -> AppResult<index::FileList> {
-    state.index.list(&state.root()?)
+    let root = state.root()?;
+    let idx = state
+        .workspaces
+        .lock()
+        .unwrap()
+        .get(&root)
+        .map(|e| e.index.clone())
+        .ok_or(AppError::NoWorkspace)?;
+    idx.list(&root)
 }
 
 // ---------- git ----------
@@ -286,25 +407,29 @@ fn git_diff(
 }
 
 /// Stage/unstage/commit mutate only the index/HEAD, not files — so we emit
-/// `git:stale` ourselves since the watcher won't see these.
+/// `git:stale` ourselves since the watcher won't see these. The payload is
+/// tagged with the active root like the watcher-driven emissions.
 #[tauri::command]
 fn git_stage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> AppResult<()> {
-    git::stage(&state.root()?, &paths)?;
-    let _ = app.emit("git:stale", serde_json::Value::Null);
+    let root = state.root()?;
+    git::stage(&root, &paths)?;
+    let _ = app.emit("git:stale", serde_json::json!({ "root": root.to_string_lossy() }));
     Ok(())
 }
 
 #[tauri::command]
 fn git_unstage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> AppResult<()> {
-    git::unstage(&state.root()?, &paths)?;
-    let _ = app.emit("git:stale", serde_json::Value::Null);
+    let root = state.root()?;
+    git::unstage(&root, &paths)?;
+    let _ = app.emit("git:stale", serde_json::json!({ "root": root.to_string_lossy() }));
     Ok(())
 }
 
 #[tauri::command]
 fn git_commit(app: AppHandle, state: State<AppState>, message: String) -> AppResult<()> {
-    git::commit(&state.root()?, &message)?;
-    let _ = app.emit("git:stale", serde_json::Value::Null);
+    let root = state.root()?;
+    git::commit(&root, &message)?;
+    let _ = app.emit("git:stale", serde_json::json!({ "root": root.to_string_lossy() }));
     Ok(())
 }
 
@@ -350,6 +475,15 @@ struct PtySpawnArgs {
     /// Optional workspace-relative working dir (e.g. a worktree path).
     /// Resolved inside the workspace root; defaults to the root itself.
     cwd: Option<String>,
+    /// Canonical root of the project this terminal belongs to. Defaults
+    /// to the active workspace — explicit so a spawn racing a project
+    /// switch can't land in the wrong root.
+    workspace: Option<String>,
+    /// A command typed into the interactive shell right after spawn —
+    /// used for confirmed package installs so the user sees the command
+    /// run (and its prompts) in a real terminal. Ignored for command
+    /// spawns, which have no shell to type into.
+    init_cmd: Option<String>,
     cols: u16,
     rows: u16,
 }
@@ -360,7 +494,11 @@ fn pty_spawn(
     state: State<AppState>,
     args: PtySpawnArgs,
 ) -> AppResult<pty::PtyInfo> {
-    let root = state.root()?;
+    let root = match args.workspace.as_deref() {
+        Some(p) => workspace_key(&state, p)
+            .ok_or_else(|| AppError::NotFound(format!("workspace not open: {p}")))?,
+        None => state.root()?,
+    };
     // Optional cwd (worktree sessions) — must resolve to a dir inside root.
     let session_root = match args.cwd.as_deref() {
         Some(rel) if !rel.trim().is_empty() => {
@@ -406,18 +544,30 @@ fn pty_spawn(
     };
 
     // Emit closure also feeds the session registry (activity + exit).
+    // Session updates go out scoped to the workspace this PTY belongs to.
     let sessions = state.sessions.clone();
     let emit_app = app.clone();
+    let emit_root = root.clone();
     let emit: pty::PtyEmit = Arc::new(move |id, kind, payload| {
         match kind {
             "out" => {
-                sessions.note_output(id);
-                emit_sessions(&emit_app, false);
+                // Decode the base64 chunk so the session meter can scan
+                // the text for token/cost lines the CLI printed.
+                let bytes = payload
+                    .as_str()
+                    .and_then(|b64| {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(b64)
+                            .ok()
+                    })
+                    .unwrap_or_default();
+                sessions.note_output(id, &bytes);
+                emit_sessions(&emit_app, &emit_root, false);
             }
             "exit" => {
                 let code = payload.get("code").and_then(|c| c.as_i64());
                 sessions.note_exit(id, code);
-                emit_sessions(&emit_app, true);
+                emit_sessions(&emit_app, &emit_root, true);
                 persist_sessions(&emit_app, true);
             }
             _ => {}
@@ -425,6 +575,29 @@ fn pty_spawn(
         let _ = emit_app.emit(&format!("pty:{kind}:{id}"), payload);
     });
     let info = state.ptys.spawn(spec, emit)?;
+
+    // Confirmed installs (and similar flows) type a command into the new
+    // interactive shell. A short delay lets the prompt render first; the
+    // input is buffered by the PTY either way, so nothing is lost.
+    if program.is_none() {
+        if let Some(cmd) = args
+            .init_cmd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            let app2 = app.clone();
+            let pty_id = info.id;
+            let cmd = cmd.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                let _ = app2
+                    .state::<AppState>()
+                    .ptys
+                    .write(pty_id, format!("{cmd}\r").as_bytes());
+            });
+        }
+    }
 
     // Attach a first-class agent session.
     let rel_prefix = crate::paths::rel_of(&root, &session_root).unwrap_or_default();
@@ -437,7 +610,7 @@ fn pty_spawn(
         root: crate::paths::normalize(&session_root.to_string_lossy()),
         rel_prefix,
     });
-    emit_sessions(&app, true);
+    emit_sessions(&app, &root, true);
     persist_sessions(&app, true);
     Ok(info)
 }
@@ -468,9 +641,9 @@ fn pty_kill(state: State<AppState>, id: u64) -> AppResult<()> {
 #[tauri::command]
 fn session_list(state: State<AppState>) -> AppResult<session::SessionsEvent> {
     let root = state.root()?;
-    Ok(state
-        .sessions
-        .snapshot(&crate::paths::normalize(&root.to_string_lossy())))
+    // Pass the raw root — snapshot() normalizes internally and echoes the
+    // verbatim string back so the frontend can match it to WorkspaceInfo.
+    Ok(state.sessions.snapshot(&root.to_string_lossy()))
 }
 
 #[tauri::command]
@@ -484,8 +657,9 @@ fn session_rename(
     if label.is_empty() {
         return Err(AppError::InvalidInput("empty label".into()));
     }
+    let root = state.root()?;
     state.sessions.rename(&id, label)?;
-    emit_sessions(&app, true);
+    emit_sessions(&app, &root, true);
     persist_sessions(&app, true);
     Ok(())
 }
@@ -675,6 +849,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_workspace,
+            activate_workspace,
+            close_workspace,
             get_workspace,
             list_dir,
             read_file,
@@ -717,6 +893,12 @@ pub fn run() {
             load_state,
             save_state,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ai-cli-editor");
+        .build(tauri::generate_context!())
+        .expect("error while building ai-cli-editor")
+        .run(|app, event| {
+            // Terminals and agent processes are ours — don't orphan them.
+            if let tauri::RunEvent::Exit = event {
+                app.state::<AppState>().ptys.kill_all();
+            }
+        });
 }

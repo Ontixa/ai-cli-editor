@@ -14,7 +14,16 @@ import {
   checkpointPlan,
   markUserAction,
 } from "../../state/actions";
-import { agentName, sessionAge, collisionSummary } from "../../lib/agents";
+import {
+  agentName,
+  sessionAge,
+  collisionSummary,
+  sessionTokens,
+  sessionCost,
+  fmtTokens,
+  fmtCost,
+  usageTotals,
+} from "../../lib/agents";
 import type { AgentSession, CheckpointMeta, RestorePlan, WorktreeInfo } from "../../lib/types";
 
 function stateClass(s: AgentSession): string {
@@ -31,6 +40,15 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
 
   const currentCmd = s.commands.find((c) => c.running);
   const lastCmd = [...s.commands].reverse().find((c) => !c.running);
+  const tokens = sessionTokens(s);
+  const cost = sessionCost(s);
+  const tokenTitle = [
+    s.tokensIn ? `in ${s.tokensIn.toLocaleString()}` : "",
+    s.tokensOut ? `out ${s.tokensOut.toLocaleString()}` : "",
+    s.tokensTotal ? `total ${s.tokensTotal.toLocaleString()}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className={`sess-card ${s.live ? "" : "dead"}`}>
@@ -74,6 +92,19 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
         {s.touchedCount > 0 && (
           <span className="sess-tag" title={`${s.touchedCount} files touched`}>
             {s.touchedCount} files
+          </span>
+        )}
+        {tokens > 0 && (
+          <span className="sess-tag tok" title={`tokens used — ${tokenTitle}`}>
+            ⭑ {fmtTokens(tokens)}
+          </span>
+        )}
+        {cost && (
+          <span
+            className="sess-tag cost"
+            title={cost.estimated ? "estimated cost (static price table)" : "cost reported by CLI"}
+          >
+            {fmtCost(cost.usd, cost.estimated)}
           </span>
         )}
         {currentCmd && (
@@ -383,6 +414,16 @@ export function Agents() {
     return { live, stale };
   }, [sessions]);
 
+  const totals = useMemo(() => usageTotals(sessions), [sessions]);
+  const totalCost = totals.costUsd + totals.costEstimated;
+  const totalsTitle =
+    `tokens used across ${sessions.length} session(s)` +
+    (totalCost > 0
+      ? totals.costEstimated > 0
+        ? ` — $${totals.costUsd.toFixed(2)} reported + ≈$${totals.costEstimated.toFixed(2)} estimated`
+        : " — reported by CLI"
+      : "");
+
   const sessionById = useMemo(() => {
     const m = new Map<string, string>();
     for (const s of sessions) m.set(s.id, s.label);
@@ -412,6 +453,17 @@ export function Agents() {
       <div className="panel-subhead">
         <span className="dim">sessions</span>
         <span className="count">{live.length}</span>
+        {(totals.tokens > 0 || totalCost > 0) && (
+          <span className="usage-total" title={totalsTitle}>
+            ⭑ {fmtTokens(totals.tokens)}
+            {totalCost > 0 &&
+              ` · ${totals.costUsd > 0 ? fmtCost(totals.costUsd, false) : ""}${
+                totals.costEstimated > 0
+                  ? (totals.costUsd > 0 ? "+" : "") + fmtCost(totals.costEstimated, true)
+                  : ""
+              }`}
+          </span>
+        )}
         <span className="spacer" />
         {isRepo && (
           <button className="mini-btn primary" onClick={() => setCreating((x) => !x)}>

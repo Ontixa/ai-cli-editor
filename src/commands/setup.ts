@@ -165,6 +165,40 @@ export function registerCommands() {
       },
     },
     {
+      id: "tab.closeOthers",
+      title: "Close Other Tabs",
+      category: "Tab",
+      when: hasWorkspace,
+      run: () => {
+        const k = store.get().activeTab;
+        if (k) A.closeOtherTabs(k);
+      },
+    },
+    {
+      id: "tab.closeRight",
+      title: "Close Tabs to the Right",
+      category: "Tab",
+      when: hasWorkspace,
+      run: () => {
+        const k = store.get().activeTab;
+        if (k) A.closeTabsToRight(k);
+      },
+    },
+    {
+      id: "tab.closeAll",
+      title: "Close All Tabs",
+      category: "Tab",
+      when: hasWorkspace,
+      run: () => A.closeAllTabs(),
+    },
+    {
+      id: "tab.closeSaved",
+      title: "Close Saved Tabs",
+      category: "Tab",
+      when: hasWorkspace,
+      run: () => A.closeSavedTabs(),
+    },
+    {
       id: "tab.next",
       title: "Next Tab",
       category: "Tab",
@@ -177,6 +211,46 @@ export function registerCommands() {
       category: "Tab",
       shortcut: "Ctrl+Shift+Tab",
       run: () => A.nextTab(-1),
+    },
+    {
+      id: "project.next",
+      title: "Next Project",
+      category: "Project",
+      shortcut: "Ctrl+Alt+ArrowRight",
+      run: () => A.nextProject(1),
+    },
+    {
+      id: "project.prev",
+      title: "Previous Project",
+      category: "Project",
+      shortcut: "Ctrl+Alt+ArrowLeft",
+      run: () => A.nextProject(-1),
+    },
+    {
+      id: "project.close",
+      title: "Close Project",
+      category: "Project",
+      when: hasWorkspace,
+      run: () => {
+        const r = store.get().workspace?.root;
+        if (r) A.requestCloseProject(r);
+      },
+    },
+    {
+      id: "project.closeOthers",
+      title: "Close Other Projects",
+      category: "Project",
+      when: hasWorkspace,
+      run: () => {
+        const r = store.get().workspace?.root;
+        if (r) void A.closeOtherProjects(r);
+      },
+    },
+    {
+      id: "project.closeAll",
+      title: "Close All Projects",
+      category: "Project",
+      run: () => void A.closeAllProjects(),
     },
   ]);
 }

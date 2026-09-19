@@ -7,7 +7,8 @@ import type {
   FileData,
   FileList,
   FileTouch,
-  FsChange,
+  FsBatch,
+  GitStaleEvent,
   GitStatus,
   LinkTarget,
   PtyInfo,
@@ -28,6 +29,10 @@ export const inTauri = (): boolean =>
 
 export const api = {
   openWorkspace: (path: string) => invoke<WorkspaceInfo>("open_workspace", { path }),
+  /** Switch the backend's active workspace to an already-open root. */
+  activateWorkspace: (path: string) => invoke<WorkspaceInfo>("activate_workspace", { path }),
+  /** Close a project: drops its watcher, kills its PTYs, retires sessions. */
+  closeWorkspace: (path: string) => invoke<void>("close_workspace", { path }),
   getWorkspace: () => invoke<WorkspaceInfo | null>("get_workspace"),
   listDir: (path?: string) => invoke<DirEntry[]>("list_dir", { path: path ?? null }),
   readFile: (path: string) => invoke<FileData>("read_file", { path }),
@@ -63,6 +68,12 @@ export const api = {
     args?: string[];
     label?: string;
     cwd?: string;
+    /** Canonical root of the owning project — required so a spawn racing
+     *  a project switch can't land in the wrong workspace. */
+    workspace?: string;
+    /** Command typed into the interactive shell right after spawn —
+     *  used for confirmed installs (shell spawns only). */
+    initCmd?: string;
     cols: number;
     rows: number;
   }) => invoke<PtyInfo>("pty_spawn", { args }),
@@ -104,12 +115,12 @@ export const api = {
 
 // ---------- events ----------
 
-export function onFsBatch(cb: (changes: FsChange[]) => void): Promise<UnlistenFn> {
-  return listen<FsChange[]>("fs:batch", (e) => cb(e.payload));
+export function onFsBatch(cb: (batch: FsBatch) => void): Promise<UnlistenFn> {
+  return listen<FsBatch>("fs:batch", (e) => cb(e.payload));
 }
 
-export function onGitStale(cb: () => void): Promise<UnlistenFn> {
-  return listen("git:stale", () => cb());
+export function onGitStale(cb: (root: string) => void): Promise<UnlistenFn> {
+  return listen<GitStaleEvent>("git:stale", (e) => cb(e.payload.root));
 }
 
 export function onPtyOut(id: number, cb: (bytes: Uint8Array) => void): Promise<UnlistenFn> {

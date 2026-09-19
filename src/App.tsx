@@ -17,6 +17,7 @@ import { TerminalPanel } from "./components/terminal/TerminalPanel";
 import { StatusBar } from "./components/StatusBar";
 import { QuickOpen } from "./components/overlays/QuickOpen";
 import { CommandPalette } from "./components/overlays/CommandPalette";
+import { ConfirmModal } from "./components/overlays/ConfirmModal";
 import { Splitter } from "./components/Splitter";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
@@ -82,6 +83,7 @@ export default function App() {
       <StatusBar />
       <QuickOpen />
       <CommandPalette />
+      <ConfirmModal />
     </div>
   );
 }

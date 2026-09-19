@@ -6,6 +6,8 @@ import {
   setActiveTerminal,
   toggleTerminal,
   markUserAction,
+  installAgent,
+  refreshAgents,
 } from "../../state/actions";
 import { TerminalView } from "./TerminalView";
 import { ErrorBoundary } from "../ErrorBoundary";
@@ -71,6 +73,28 @@ export function TerminalPanel() {
                 {a.name}
               </button>
             ))}
+          {agents
+            .filter((a) => !a.available && a.install)
+            .map((a) => (
+              <button
+                key={a.id}
+                className="agent-chip install"
+                title={`Install ${a.name} — runs: ${a.install}`}
+                onClick={() => {
+                  markUserAction();
+                  installAgent(a);
+                }}
+              >
+                ⬇ {a.name}
+              </button>
+            ))}
+          <button
+            className="agent-chip refresh"
+            title="Re-detect installed CLIs"
+            onClick={refreshAgents}
+          >
+            ↻
+          </button>
         </div>
         <button className="icon-btn" title="Hide terminal" onClick={toggleTerminal}>
           ▾
@@ -85,7 +109,7 @@ export function TerminalPanel() {
               </button>
               <span className="dim">
                 {workspace
-                  ? "run codex, claude, gemini, opencode, aider — or anything else"
+                  ? "run codex, claude, gemini — or install one with the ⬇ chips above"
                   : "open a folder first"}
               </span>
             </div>

@@ -33,6 +33,18 @@ export interface FsChange {
   oldPath?: string | null;
 }
 
+/** fs:batch payload — tagged with the emitting workspace's root so the
+ *  frontend can route changes to the right project tab. */
+export interface FsBatch {
+  root: string;
+  changes: FsChange[];
+}
+
+/** git:stale payload. */
+export interface GitStaleEvent {
+  root: string;
+}
+
 export interface GitChange {
   path: string;
   origPath?: string | null;
@@ -116,6 +128,15 @@ export interface AgentSession {
   commands: CommandRun[];
   children: ChildProc[];
   git?: SessionGit | null;
+  /** Token usage the CLI reported on its output (backend meter.rs). */
+  tokensIn: number;
+  tokensOut: number;
+  tokensTotal: number;
+  /** USD cost the CLI itself printed — the exact figure. */
+  costUsd: number;
+  /** Estimate from the static price table when no cost was reported —
+   *  show as `≈$x`, never as an exact bill. */
+  costEstimated: number;
 }
 
 export interface Collision {
@@ -126,6 +147,8 @@ export interface Collision {
 }
 
 export interface SessionsEvent {
+  /** Workspace this snapshot was computed for (WorkspaceInfo.root form). */
+  root: string;
   sessions: AgentSession[];
   collisions: Collision[];
 }
@@ -186,6 +209,9 @@ export interface AgentInfo {
   name: string;
   path?: string | null;
   available: boolean;
+  /** Confirmed shell command that installs this CLI (typed into a real
+   *  terminal after user confirmation — never run silently). */
+  install?: string | null;
 }
 
 export interface ShellSpec {

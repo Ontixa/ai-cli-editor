@@ -134,6 +134,15 @@ pub struct SessionSnapshot {
     pub commands: Vec<CommandRun>,
     pub children: Vec<ChildProc>,
     pub git: Option<SessionGit>,
+    /// Token usage the CLI reported on its output (see meter.rs).
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub tokens_total: u64,
+    /// USD cost the CLI itself printed — the exact figure.
+    pub cost_usd: f64,
+    /// Derived from the static price table when the CLI reports tokens but
+    /// no cost. UI shows this as `≈$x` — it is an estimate, not a bill.
+    pub cost_estimated: f64,
 }
 
 /// Operational warning surfaced when sessions plausibly collide.
@@ -151,6 +160,9 @@ pub struct Collision {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionsEvent {
+    /// The workspace this snapshot was computed for — lets the frontend
+    /// route updates to the right project tab.
+    pub root: String,
     pub sessions: Vec<SessionSnapshot>,
     pub collisions: Vec<Collision>,
 }
@@ -179,6 +191,8 @@ struct AgentSession {
     children: Vec<ChildProc>,
     git: Option<SessionGit>,
     git_at: u64,
+    /// Usage meter fed from this session's PTY output.
+    meter: crate::meter::Meter,
 }
 
 impl AgentSession {
@@ -260,6 +274,11 @@ impl AgentSession {
             commands,
             children: self.children.clone(),
             git: self.git.clone(),
+            tokens_in: self.meter.tokens_in,
+            tokens_out: self.meter.tokens_out,
+            tokens_total: self.meter.tokens_total,
+            cost_usd: self.meter.cost_usd,
+            cost_estimated: self.meter.estimated_cost(&self.agent).unwrap_or(0.0),
         }
     }
 
@@ -279,6 +298,10 @@ impl AgentSession {
             exit_code: self.exit_code,
             touched: self.touched.values().cloned().collect(),
             commands: self.commands.iter().cloned().collect(),
+            tokens_in: self.meter.tokens_in,
+            tokens_out: self.meter.tokens_out,
+            tokens_total: self.meter.tokens_total,
+            cost_usd: self.meter.cost_usd,
         }
     }
 }
@@ -309,6 +332,15 @@ pub struct PersistedSession {
     pub touched: Vec<FileTouch>,
     #[serde(default)]
     pub commands: Vec<CommandRun>,
+    /// Metered usage — survives restarts so history keeps its cost.
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
+    #[serde(default)]
+    pub tokens_total: u64,
+    #[serde(default)]
+    pub cost_usd: f64,
 }
 
 impl From<PersistedSession> for AgentSession {
@@ -346,6 +378,12 @@ impl From<PersistedSession> for AgentSession {
             children: Vec::new(),
             git: None,
             git_at: 0,
+            meter: crate::meter::Meter::with_totals(
+                p.tokens_in,
+                p.tokens_out,
+                p.tokens_total,
+                p.cost_usd,
+            ),
         }
     }
 }
@@ -418,6 +456,7 @@ impl SessionRegistry {
             children: Vec::new(),
             git: None,
             git_at: 0,
+            meter: crate::meter::Meter::default(),
         };
         let mut g = self.inner.lock().unwrap();
         // Instant-exit race: the waiter thread may have reported this PTY's
@@ -435,12 +474,16 @@ impl SessionRegistry {
         id
     }
 
-    /// PTY produced output — marks the session recently active.
+    /// PTY produced output — marks the session recently active and feeds
+    /// the chunk to the usage meter (token/cost lines the CLI prints).
     /// Returns true when the session is known (for emit decisions).
-    pub fn note_output(&self, pty_id: u64) -> bool {
+    pub fn note_output(&self, pty_id: u64, chunk: &[u8]) -> bool {
         let mut g = self.inner.lock().unwrap();
         if let Some(s) = g.sessions.values_mut().find(|s| s.pty_id == Some(pty_id)) {
             s.last_activity_at = now_ms();
+            if !chunk.is_empty() {
+                s.meter.feed(&String::from_utf8_lossy(chunk));
+            }
             return true;
         }
         false
@@ -492,6 +535,36 @@ impl SessionRegistry {
         }
     }
 
+    /// Mark live sessions rooted under `ws_root` exited (that project tab
+    /// is closing) and return their PTY ids so the caller can kill the
+    /// processes. Sessions of other workspaces are untouched.
+    pub fn detach_root(&self, ws_root: &str) -> Vec<u64> {
+        let mut g = self.inner.lock().unwrap();
+        let now = now_ms();
+        let norm = crate::paths::normalize(ws_root);
+        let prefix = format!("{norm}/");
+        let mut ptys = Vec::new();
+        for s in g.sessions.values_mut() {
+            if !(s.root == norm || s.root.starts_with(&prefix)) {
+                continue;
+            }
+            if s.live {
+                s.live = false;
+                s.ended_at = Some(now);
+                if let Some(id) = s.pty_id {
+                    ptys.push(id);
+                }
+                s.pid = None;
+                s.children.clear();
+                for c in s.commands.iter_mut().filter(|c| c.running) {
+                    c.running = false;
+                    c.ended_at = Some(now);
+                }
+            }
+        }
+        ptys
+    }
+
     /// Attribute a watcher batch to sessions. Returns true when any session
     /// mutated (caller should emit `session:update`).
     ///
@@ -499,9 +572,18 @@ impl SessionRegistry {
     /// `rel_prefix` contains it. Exactly one candidate → Direct. Several →
     /// the most recently active gets `Likely`, the event is ambiguous so we
     /// record `Ambiguous` on the others. None → not session activity.
-    pub fn note_fs_changes(&self, changes: &[FsChange]) -> bool {
+    ///
+    /// `ws_root` scopes candidates to sessions belonging to the workspace
+    /// that produced the batch — with several projects open, an identical
+    /// rel_prefix elsewhere must never steal the attribution.
+    pub fn note_fs_changes(&self, ws_root: &str, changes: &[FsChange]) -> bool {
         let mut g = self.inner.lock().unwrap();
         let now = now_ms();
+        let root_norm = crate::paths::normalize(ws_root);
+        let root_prefix = format!("{root_norm}/");
+        let in_workspace = |s: &AgentSession| -> bool {
+            s.root == root_norm || s.root.starts_with(&root_prefix)
+        };
         let mut mutated = false;
 
         for change in changes {
@@ -520,7 +602,7 @@ impl SessionRegistry {
                 .order
                 .iter()
                 .filter_map(|id| g.sessions.get(id))
-                .filter(|s| s.live && matches(s))
+                .filter(|s| s.live && in_workspace(s) && matches(s))
                 .collect();
             let best_depth = all.iter().map(|s| s.rel_prefix.len()).max();
             let mut candidates: Vec<&AgentSession> = match best_depth {
@@ -668,18 +750,21 @@ impl SessionRegistry {
     /// Sessions that need a git refresh after a workspace batch: for each
     /// changed path, only the most specific matching live session — a
     /// worktree-internal change refreshes the worktree's git, not the
-    /// outer repo's.
-    pub fn refresh_git_for_paths(&self, changes: &[FsChange]) -> Vec<String> {
+    /// outer repo's. `ws_root` scopes to sessions of the emitting workspace.
+    pub fn refresh_git_for_paths(&self, ws_root: &str, changes: &[FsChange]) -> Vec<String> {
         let g = self.inner.lock().unwrap();
+        let root_norm = crate::paths::normalize(ws_root);
+        let root_prefix = format!("{root_norm}/");
         let mut out: Vec<String> = Vec::new();
         for c in changes {
             let hit = |s: &&AgentSession| -> bool {
-                s.rel_prefix.is_empty()
-                    || c.path == s.rel_prefix
-                    || c.path.starts_with(&format!("{}/", s.rel_prefix))
-                    || c.old_path
-                        .as_deref()
-                        .is_some_and(|o| o.starts_with(&format!("{}/", s.rel_prefix)))
+                (s.root == root_norm || s.root.starts_with(&root_prefix))
+                    && (s.rel_prefix.is_empty()
+                        || c.path == s.rel_prefix
+                        || c.path.starts_with(&format!("{}/", s.rel_prefix))
+                        || c.old_path
+                            .as_deref()
+                            .is_some_and(|o| o.starts_with(&format!("{}/", s.rel_prefix))))
             };
             let mut best_len: Option<usize> = None;
             let mut hits: Vec<String> = Vec::new();
@@ -739,6 +824,8 @@ impl SessionRegistry {
 
     /// Current snapshot for the workspace. `workspace_root` filters the
     /// list so historical sessions from other workspaces don't leak in.
+    /// The event echoes `workspace_root` verbatim so the frontend can match
+    /// it against the WorkspaceInfo.root string it already holds.
     pub fn snapshot(&self, workspace_root: &str) -> SessionsEvent {
         let g = self.inner.lock().unwrap();
         let now = now_ms();
@@ -752,6 +839,7 @@ impl SessionRegistry {
         let snaps: Vec<SessionSnapshot> = sessions.iter().map(|s| s.snapshot(now)).collect();
         let collisions = detect_collisions(&sessions);
         SessionsEvent {
+            root: workspace_root.to_string(),
             sessions: snaps,
             collisions,
         }
@@ -843,10 +931,9 @@ pub fn classify_command(name: &str, cmd: &str) -> String {
     {
         return "build".into();
     }
-    if matches!(
-        crate::platform::agent_kind(&n),
-        "codex" | "claude" | "devin" | "gemini" | "opencode" | "aider"
-    ) {
+    // Anything agent_kind recognizes (the KNOWN_AGENTS catalog) counts as
+    // an agent child process — new CLIs need no list update here.
+    if !matches!(crate::platform::agent_kind(&n), "shell" | "terminal") {
         return "agent".into();
     }
     if [
@@ -1001,7 +1088,7 @@ mod tests {
     #[test]
     fn single_session_direct_attribution() {
         let (reg, _) = reg_with(1, "");
-        assert!(reg.note_fs_changes(&[change("src/a.rs")]));
+        assert!(reg.note_fs_changes("C:/repo", &[change("src/a.rs")]));
         let files = reg
             .touched_files(&reg.snapshot("C:/repo").sessions[0].id)
             .unwrap();
@@ -1013,7 +1100,7 @@ mod tests {
     #[test]
     fn shared_root_is_ambiguous() {
         let (reg, ids) = reg_with(2, "");
-        reg.note_fs_changes(&[change("src/a.rs")]);
+        reg.note_fs_changes("C:/repo", &[change("src/a.rs")]);
         let ev = reg.snapshot("C:/repo");
         // Both sessions get the touch; exactly one is "likely".
         let attrs: Vec<Attribution> = ev
@@ -1053,7 +1140,7 @@ mod tests {
             root: "C:/repo/.worktrees/wt".into(),
             rel_prefix: ".worktrees/wt".into(),
         });
-        reg.note_fs_changes(&[change(".worktrees/wt/src/x.rs")]);
+        reg.note_fs_changes("C:/repo", &[change(".worktrees/wt/src/x.rs")]);
         let ev = reg.snapshot("C:/repo");
         let wt = ev.sessions.iter().find(|s| s.label == "wt").unwrap();
         assert_eq!(wt.recent_files.len(), 1);
@@ -1088,8 +1175,8 @@ mod tests {
         });
         // Root session touches src/x.rs; worktree session touches its own
         // src/x.rs (a different physical file).
-        reg.note_fs_changes(&[change("src/x.rs")]);
-        reg.note_fs_changes(&[change(".worktrees/wt/src/x.rs")]);
+        reg.note_fs_changes("C:/repo", &[change("src/x.rs")]);
+        reg.note_fs_changes("C:/repo", &[change(".worktrees/wt/src/x.rs")]);
         let ev = reg.snapshot("C:/repo");
         assert!(ev.collisions.iter().all(|c| c.kind != "file"));
     }
@@ -1131,6 +1218,10 @@ mod tests {
             exit_code: Some(0),
             touched: vec![],
             commands: vec![],
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_total: 0,
+            cost_usd: 0.0,
         }]);
         let ev = reg.snapshot("C:/repo");
         assert_eq!(ev.sessions[0].state, "stale");

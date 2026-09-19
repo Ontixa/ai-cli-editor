@@ -43,8 +43,9 @@ export function DiffView({ path, staged: initialStaged, untracked }: Props) {
         .catch((e) => setError(String(e)));
     };
     load();
-    void onFsBatch((changes) => {
-      if (changes.some((c) => c.path === path || c.oldPath === path)) load();
+    void onFsBatch((batch) => {
+      if (batch.root !== store.get().workspace?.root) return;
+      if (batch.changes.some((c) => c.path === path || c.oldPath === path)) load();
     }).then((f) => (un = f));
     return () => un?.();
   }, [path, staged, untracked]);

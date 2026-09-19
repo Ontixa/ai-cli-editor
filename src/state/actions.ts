@@ -2,10 +2,15 @@
  * Application actions: every meaningful state transition lives here so
  * components stay thin. Subscriptions to backend events are set up once in
  * `setupBackendListeners`.
+ *
+ * Project tabs: several workspaces can be open at once. The flat fields on
+ * AppState always describe the ACTIVE project; every other open project
+ * keeps a snapshot in `projectData[root]` that swaps in on activation —
+ * browser-tab semantics (terminals, undo history, explorer state survive).
  */
 
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { store, type AppState, type Tab } from "./app";
+import { store, type AppState, type ProjectSnapshot, type Tab, type TerminalSession } from "./app";
 import {
   api,
   onFsBatch,
@@ -16,15 +21,24 @@ import {
   inTauri,
 } from "../lib/ipc";
 import { editorManager } from "../lib/editor-manager";
+import { disposeTerm } from "../lib/terminal-manager";
 import { ingestChanges, pushNotice } from "../lib/activity";
 import { checkForUpdate, downloadAndInstall, relaunchApp } from "../lib/update";
 import { isSourcePath } from "../lib/lang";
-import type { AgentSession, FsChange, RestorePlan } from "../lib/types";
+import type {
+  AgentInfo,
+  AgentSession,
+  FsBatch,
+  FsChange,
+  RestorePlan,
+  WorkspaceInfo,
+} from "../lib/types";
 
 const fileKey = (path: string) => `file:${path}`;
 const diffKey = (path: string, staged: boolean) => `diff:${path}:${staged ? "staged" : "wt"}`;
 const baseName = (p: string) => p.split("/").pop() ?? p;
 const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
+const wsRoot = () => store.get().workspace?.root ?? "";
 
 // ---------- boot / persistence ----------
 
@@ -39,10 +53,16 @@ function schedulePersist() {
 function persistNow() {
   const s = store.get();
   void api.saveState({
-    version: 1,
-    workspace: s.workspace,
-    tabs: s.tabs,
-    activeTab: s.activeTab,
+    version: 2,
+    projects: s.projects.map((p) => {
+      const f = p.root === s.workspace?.root ? takeSnapshot(s) : s.projectData[p.root];
+      return {
+        root: p.root,
+        tabs: (f?.tabs ?? []).filter((t) => t.kind === "file"),
+        activeTab: f?.activeTab ?? null,
+      };
+    }),
+    activeProject: s.workspace?.root ?? null,
     sidebarVisible: s.sidebarVisible,
     sidebarTab: s.sidebarTab,
     sidebarWidth: s.sidebarWidth,
@@ -52,7 +72,14 @@ function persistNow() {
     diffMode: s.diffMode,
     theme: s.theme,
     recentFiles: s.recentFiles.slice(0, 20),
+    recentProjects: s.recentProjects.slice(0, 12),
   });
+}
+
+interface PersistedProject {
+  root?: string;
+  tabs?: Tab[];
+  activeTab?: string | null;
 }
 
 export async function boot() {
@@ -67,8 +94,18 @@ export async function boot() {
   } catch {
     restored = null;
   }
-  if (!restored || restored.version !== 1) return;
 
+  if (restored?.version === 2) {
+    await bootV2(restored);
+  } else if (restored?.version === 1) {
+    await bootV1(restored);
+  }
+
+  // Sole intentional network call: check GitHub Releases for a signed update.
+  void checkForUpdates();
+}
+
+function restoreGlobalPrefs(restored: Record<string, unknown>) {
   store.set({
     sidebarVisible: restored.sidebarVisible !== false,
     sidebarTab: (restored.sidebarTab as AppState["sidebarTab"]) ?? "files",
@@ -81,29 +118,73 @@ export async function boot() {
     recentFiles: Array.isArray(restored.recentFiles)
       ? (restored.recentFiles as string[]).filter((x) => typeof x === "string")
       : [],
+    recentProjects: Array.isArray(restored.recentProjects)
+      ? (restored.recentProjects as string[]).filter((x) => typeof x === "string")
+      : [],
   });
   applyTheme(store.get().theme);
+}
 
-  const ws = restored.workspace as { root?: string } | null;
-  if (ws?.root) {
+/** v2 layout: a project list + per-project tab state. */
+async function bootV2(restored: Record<string, unknown>) {
+  restoreGlobalPrefs(restored);
+  const persisted = Array.isArray(restored.projects)
+    ? (restored.projects as PersistedProject[])
+    : [];
+
+  const projects: { root: string; name: string }[] = [];
+  const snapshots: Record<string, ProjectSnapshot> = {};
+  for (const p of persisted) {
+    if (!p?.root || typeof p.root !== "string") continue;
     try {
-      await openWorkspacePath(ws.root);
-      // Restore tabs after workspace opens.
-      const tabs = Array.isArray(restored.tabs) ? (restored.tabs as Tab[]) : [];
-      const fileTabs = tabs.filter((t) => t.kind === "file");
-      if (fileTabs.length) {
-        store.set({ tabs: fileTabs });
-        const active = restored.activeTab as string | null;
-        const activeTab = fileTabs.find((t) => t.key === active) ?? fileTabs[0];
-        if (activeTab) void activateTab(activeTab.key);
-      }
+      const info = await api.openWorkspace(p.root); // registers + activates
+      const tabs = (Array.isArray(p.tabs) ? p.tabs : []).filter((t) => t?.kind === "file");
+      projects.push({ root: info.root, name: info.name });
+      snapshots[info.root] = {
+        ...freshProjectFields(info),
+        tabs,
+        activeTab: tabs.find((t) => t.key === p.activeTab)?.key ?? tabs[0]?.key ?? null,
+      };
     } catch {
-      store.set({ workspaceError: `Could not reopen ${ws.root}` });
+      // Folder moved or deleted — skip it silently.
     }
   }
 
-  // Sole intentional network call: check GitHub Releases for a signed update.
-  void checkForUpdates();
+  const want = restored.activeProject as string | null;
+  const target = projects.find((p) => p.root === want)?.root ?? projects.at(-1)?.root;
+  if (!target) {
+    store.set({ projects });
+    return;
+  }
+  const snap = snapshots[target];
+  delete snapshots[target];
+  try {
+    await api.activateWorkspace(target);
+  } catch {
+    /* already active from the last openWorkspace call */
+  }
+  store.set({ projects, projectData: snapshots, ...snap });
+  void refreshAfterActivate();
+}
+
+/** v1 → v2: a single workspace becomes one project tab. */
+async function bootV1(restored: Record<string, unknown>) {
+  restoreGlobalPrefs(restored);
+  const ws = restored.workspace as { root?: string } | null;
+  if (!ws?.root) return;
+  try {
+    await openWorkspacePath(ws.root);
+    const tabs = Array.isArray(restored.tabs) ? (restored.tabs as Tab[]) : [];
+    const fileTabs = tabs.filter((t) => t.kind === "file");
+    if (fileTabs.length) {
+      store.set({ tabs: fileTabs });
+      const active = restored.activeTab as string | null;
+      const activeTab = fileTabs.find((t) => t.key === active) ?? fileTabs[0];
+      if (activeTab) void activateTab(activeTab.key);
+    }
+  } catch {
+    store.set({ workspaceError: `Could not reopen ${ws.root}` });
+  }
 }
 
 // ---------- app updates ----------
@@ -143,27 +224,48 @@ export function dismissUpdate(): void {
   if (u) store.set({ update: { ...u, dismissed: true } });
 }
 
-// ---------- workspace ----------
+// ---------- workspace / project tabs ----------
 
-export async function openFolder() {
-  const picked = await openDialog({ directory: true, multiple: false });
-  if (!picked || typeof picked !== "string") return;
-  await openWorkspacePath(picked);
+/** The per-project bundle that swaps on activation. */
+function takeSnapshot(s: AppState): ProjectSnapshot {
+  return {
+    workspace: s.workspace!,
+    tabs: s.tabs,
+    activeTab: s.activeTab,
+    docs: s.docs,
+    expanded: s.expanded,
+    dirInvalidations: s.dirInvalidations,
+    revealRequest: s.revealRequest,
+    git: s.git,
+    activity: s.activity,
+    followBurst: s.followBurst,
+    terminals: s.terminals,
+    activeTerminal: s.activeTerminal,
+    sessions: s.sessions,
+    collisions: s.collisions,
+    worktrees: s.worktrees,
+    checkpoints: s.checkpoints,
+    review: s.review,
+    fileIndex: s.fileIndex,
+    fileIndexTruncated: s.fileIndexTruncated,
+    search: s.search.running ? { ...s.search, running: false } : s.search,
+    cursor: s.cursor,
+  };
 }
 
-export async function openWorkspacePath(path: string) {
-  const info = await api.openWorkspace(path);
-  editorManager.dropAll();
-  store.set({
+/** Fresh per-project state for a workspace that was just opened. */
+function freshProjectFields(info: WorkspaceInfo): ProjectSnapshot {
+  return {
     workspace: info,
-    workspaceError: null,
     tabs: [],
     activeTab: null,
     docs: {},
     expanded: { "": true },
     dirInvalidations: {},
+    revealRequest: null,
     git: { isRepo: false, branch: null, changes: [] },
     activity: [],
+    followBurst: 0,
     terminals: [],
     activeTerminal: null,
     sessions: [],
@@ -172,13 +274,298 @@ export async function openWorkspacePath(path: string) {
     checkpoints: [],
     review: {},
     fileIndex: null,
+    fileIndexTruncated: false,
     search: { id: 0, query: "", matches: [], running: false, truncated: false },
-    recentFiles: store.get().recentFiles,
-  });
+    cursor: null,
+  };
+}
+
+/** Refreshes that must run whenever a project becomes active: its world may
+ *  have changed while it sat in the background. */
+function refreshAfterActivate() {
   void refreshGit();
   void refreshWorktrees();
   void refreshCheckpoints();
+  void api
+    .sessionList()
+    .then(applySessions)
+    .catch(() => {});
+  void reconcileOpenDocs();
+}
+
+/**
+ * Bring open docs in line with the disk after a project was inactive:
+ * clean docs reload, dirty docs only re-check existence (their conflict
+ * flags were already maintained by the background fs handler).
+ */
+async function reconcileOpenDocs() {
+  const s = store.get();
+  const root = s.workspace?.root;
+  if (!root) return;
+  for (const t of s.tabs) {
+    if (t.kind !== "file") continue;
+    const d = store.get().docs[t.path];
+    if (!d) continue;
+    if (d.dirty) {
+      try {
+        const exists = await api.fileExists(t.path);
+        const cur = store.get().docs[t.path];
+        if (cur) {
+          store.set({
+            docs: {
+              ...store.get().docs,
+              [t.path]: { ...cur, deletedOnDisk: !exists },
+            },
+          });
+        }
+      } catch {
+        /* best effort */
+      }
+    } else {
+      void reloadFile(t.path);
+    }
+  }
+}
+
+export async function openFolder() {
+  const picked = await openDialog({ directory: true, multiple: false });
+  if (!picked || typeof picked !== "string") return;
+  await openWorkspacePath(picked);
+}
+
+export async function openWorkspacePath(path: string) {
+  const s0 = store.get();
+  const existing = s0.projects.find((p) => p.root === path);
+  if (existing) {
+    await activateProject(existing.root);
+    return;
+  }
+  let info;
+  try {
+    info = await api.openWorkspace(path);
+  } catch (e) {
+    store.set({ workspaceError: `Could not open ${path}: ${String(e)}` });
+    return;
+  }
+  const s = store.get();
+  // Already open under a different path spelling → just switch to it.
+  if (s.projects.some((p) => p.root === info.root)) {
+    await activateProject(info.root);
+    return;
+  }
+  const projectData = { ...s.projectData };
+  if (s.workspace) projectData[s.workspace.root] = takeSnapshot(s);
+  store.set({
+    ...freshProjectFields(info),
+    projects: [...s.projects, { root: info.root, name: info.name }],
+    projectData,
+    workspaceError: null,
+  });
+  touchRecentProject(info.root);
+  refreshAfterActivate();
+  markUserAction();
   schedulePersist();
+}
+
+function touchRecentProject(root: string) {
+  const recent = [root, ...store.get().recentProjects.filter((r) => r !== root)].slice(0, 12);
+  store.set({ recentProjects: recent });
+}
+
+/** Switch to another open project tab. */
+export async function activateProject(root: string) {
+  const s = store.get();
+  if (!s.workspace || s.workspace.root === root) return;
+  const snap = s.projectData[root];
+  if (!snap) return;
+  try {
+    await api.activateWorkspace(root);
+  } catch {
+    return; // backend no longer has it — closeProject will reconcile
+  }
+  const projectData = { ...s.projectData };
+  projectData[s.workspace.root] = takeSnapshot(s);
+  delete projectData[root];
+  store.set({ ...snap, projectData, workspaceError: null });
+  refreshAfterActivate();
+  markUserAction();
+  schedulePersist();
+}
+
+/** Cycle through project tabs (Ctrl+Alt+Left/Right). */
+export function nextProject(dir = 1) {
+  const s = store.get();
+  if (s.projects.length < 2 || !s.workspace) return;
+  const idx = s.projects.findIndex((p) => p.root === s.workspace!.root);
+  const next = s.projects[(idx + dir + s.projects.length) % s.projects.length];
+  if (next) void activateProject(next.root);
+  markUserAction();
+}
+
+/** Drag-reorder project tabs. */
+export function reorderProjects(from: number, to: number) {
+  const s = store.get();
+  if (from === to || from < 0 || to < 0 || from >= s.projects.length || to >= s.projects.length)
+    return;
+  const projects = [...s.projects];
+  const [moved] = projects.splice(from, 1);
+  projects.splice(to, 0, moved);
+  store.set({ projects });
+  markUserAction();
+  schedulePersist();
+}
+
+/** Dirty-doc check, then close the project tab (terminals die with it). */
+export function requestCloseProject(root: string) {
+  const s = store.get();
+  const proj = s.projects.find((p) => p.root === root);
+  if (!proj) return;
+  const fields = root === s.workspace?.root ? s : s.projectData[root];
+  const dirty = fields
+    ? Object.entries(fields.docs).filter(
+        ([p, d]) => d.dirty && fields.tabs.some((t) => t.kind === "file" && t.path === p),
+      )
+    : [];
+  if (!dirty.length) {
+    void closeProject(root);
+    return;
+  }
+  askConfirm({
+    title: `Close ${proj.name}`,
+    message: `${dirty.length} file${dirty.length === 1 ? "" : "s"} in this project have unsaved changes that will be lost.`,
+    buttons: [
+      { label: "Cancel" },
+      {
+        label: "Close Anyway",
+        kind: "danger",
+        onPick: () => void closeProject(root),
+      },
+      {
+        label: "Save All & Close",
+        kind: "primary",
+        onPick: () =>
+          void saveDocsThen(
+            root,
+            dirty.map(([p]) => p),
+            () => closeProject(root),
+          ),
+      },
+    ],
+  });
+}
+
+/** Save dirty docs of a project (activating it first if needed). */
+async function saveDocsThen(root: string, paths: string[], then: () => void) {
+  if (store.get().workspace?.root !== root) await activateProject(root);
+  for (const p of paths) await saveFile(p);
+  then();
+}
+
+export async function closeProject(root: string) {
+  const s = store.get();
+  if (!s.projects.some((p) => p.root === root)) return;
+  const isActive = s.workspace?.root === root;
+  const terms = isActive ? s.terminals : (s.projectData[root]?.terminals ?? []);
+  for (const t of terms) disposeTerm(t.seq);
+  editorManager.dropWorkspace(root);
+  void api.closeWorkspace(root).catch(() => {});
+
+  const projects = s.projects.filter((p) => p.root !== root);
+  const projectData = { ...s.projectData };
+  delete projectData[root];
+
+  if (!isActive) {
+    store.set({ projects, projectData });
+    schedulePersist();
+    return;
+  }
+
+  // Closing the active tab: hand off to a neighbor, like a browser.
+  const idx = s.projects.findIndex((p) => p.root === root);
+  const next = projects[Math.min(idx, projects.length - 1)];
+  if (next && projectData[next.root]) {
+    const snap = projectData[next.root];
+    delete projectData[next.root];
+    try {
+      await api.activateWorkspace(next.root);
+    } catch {
+      /* may already be active */
+    }
+    store.set({ projects, projectData, ...snap, workspaceError: null });
+    refreshAfterActivate();
+  } else {
+    // Last project closed — back to the welcome screen.
+    store.set({
+      projects,
+      projectData,
+      workspace: null,
+      tabs: [],
+      activeTab: null,
+      docs: {},
+      expanded: {},
+      dirInvalidations: {},
+      revealRequest: null,
+      git: { isRepo: false, branch: null, changes: [] },
+      activity: [],
+      followBurst: 0,
+      terminals: [],
+      activeTerminal: null,
+      sessions: [],
+      collisions: [],
+      worktrees: [],
+      checkpoints: [],
+      review: {},
+      fileIndex: null,
+      fileIndexTruncated: false,
+      search: { id: 0, query: "", matches: [], running: false, truncated: false },
+      cursor: null,
+      workspaceError: null,
+    });
+  }
+  markUserAction();
+  schedulePersist();
+}
+
+/** Close every project except `root` (activates it first). */
+export async function closeOtherProjects(root: string) {
+  const s = store.get();
+  if (!s.projects.some((p) => p.root === root)) return;
+  if (s.workspace?.root !== root) await activateProject(root);
+  for (const p of [...store.get().projects]) {
+    if (p.root !== root) await closeProject(p.root);
+  }
+}
+
+/** Close every project tab — ends at the welcome screen. */
+export async function closeAllProjects() {
+  for (const p of [...store.get().projects]) {
+    // requestCloseProject would prompt per project; closing is explicit
+    // here so go through the dirty-check once for the whole batch.
+    if (dirtyPathsIn(p.root).length) {
+      requestCloseProject(p.root);
+      return; // let the user resolve dirty projects one at a time
+    }
+    await closeProject(p.root);
+  }
+}
+
+function dirtyPathsIn(root: string): string[] {
+  const s = store.get();
+  const fields = root === s.workspace?.root ? s : s.projectData[root];
+  if (!fields) return [];
+  return fields.tabs
+    .filter((t) => t.kind === "file" && fields.docs[t.path]?.dirty)
+    .map((t) => t.path);
+}
+
+// ---------- global confirm ----------
+
+export function askConfirm(c: NonNullable<AppState["confirm"]>) {
+  store.set({ confirm: c });
+}
+
+export function resolveConfirm() {
+  store.set({ confirm: null });
 }
 
 // ---------- tabs / documents ----------
@@ -186,11 +573,13 @@ export async function openWorkspacePath(path: string) {
 export async function openFile(path: string, opts?: { line?: number; col?: number }) {
   const key = fileKey(path);
   const s = store.get();
+  const root = s.workspace?.root;
+  if (!root) return;
   if (!s.tabs.some((t) => t.key === key)) {
     store.set({ tabs: [...s.tabs, { key, kind: "file", path, title: baseName(path) }] });
   }
   if (s.activeTab !== key) store.set({ activeTab: key });
-  if (opts?.line) editorManager.queueJump(path, opts.line, opts.col);
+  if (opts?.line) editorManager.queueJump(root, path, opts.line, opts.col);
 
   if (!s.docs[path]) {
     store.set({
@@ -208,7 +597,7 @@ export async function openFile(path: string, opts?: { line?: number; col?: numbe
         },
       },
     });
-    const res = await editorManager.loadDoc(path);
+    const res = await editorManager.loadDoc(root, path);
     if (res) {
       const d = store.get().docs[path] ?? {};
       store.set({ docs: { ...store.get().docs, [path]: { ...d, ...res.meta } as DocMetaT } });
@@ -232,29 +621,92 @@ export function activateTab(key: string) {
   schedulePersist();
 }
 
-export function closeTab(key: string) {
+/** Close the given tabs unconditionally (dirty checks live in requestCloseTabs). */
+export function closeTabsNow(keys: string[]) {
+  if (!keys.length) return;
   const s = store.get();
-  const idx = s.tabs.findIndex((t) => t.key === key);
-  if (idx === -1) return;
-  const tab = s.tabs[idx];
-  const tabs = s.tabs.filter((t) => t.key !== key);
-  let activeTab = s.activeTab;
-  if (activeTab === key) {
-    const next = tabs[Math.min(idx, tabs.length - 1)];
-    activeTab = next?.key ?? null;
-  }
+  const root = wsRoot();
+  const drop = new Set(keys);
   const docs = { ...s.docs };
-  if (tab.kind === "file") {
-    if (!docs[tab.path]?.dirty) {
-      editorManager.drop(tab.path);
-      delete docs[tab.path];
-    } else {
-      delete docs[tab.path];
-      editorManager.drop(tab.path);
+  for (const t of s.tabs) {
+    if (drop.has(t.key) && t.kind === "file") {
+      delete docs[t.path];
+      editorManager.drop(root, t.path);
     }
+  }
+  const tabs = s.tabs.filter((t) => !drop.has(t.key));
+  let activeTab = s.activeTab;
+  if (activeTab && drop.has(activeTab)) {
+    const lastIdx = Math.max(...s.tabs.map((t, i) => (drop.has(t.key) ? i : -1)));
+    activeTab = tabs[Math.min(lastIdx, tabs.length - 1)]?.key ?? null;
   }
   store.set({ tabs, activeTab, docs });
   schedulePersist();
+}
+
+export function closeTab(key: string) {
+  requestCloseTabs([key]);
+}
+
+/** Close tabs, asking what to do about unsaved files first. */
+export function requestCloseTabs(keys: string[]) {
+  const s = store.get();
+  const set = new Set(keys);
+  const dirty = s.tabs.filter((t) => set.has(t.key) && t.kind === "file" && s.docs[t.path]?.dirty);
+  if (!dirty.length) {
+    closeTabsNow(keys);
+    return;
+  }
+  askConfirm({
+    title: dirty.length === 1 ? `Close ${dirty[0].title}` : `Close ${dirty.length} tabs`,
+    message:
+      dirty.length === 1
+        ? `${dirty[0].path} has unsaved changes.`
+        : `${dirty.length} files have unsaved changes that will be lost.`,
+    buttons: [
+      { label: "Cancel" },
+      {
+        label: "Don't Save",
+        kind: "danger",
+        onPick: () => closeTabsNow(keys),
+      },
+      {
+        label: dirty.length === 1 ? "Save & Close" : "Save All & Close",
+        kind: "primary",
+        onPick: () =>
+          void saveThenClose(
+            keys,
+            dirty.map((t) => t.path),
+          ),
+      },
+    ],
+  });
+}
+
+async function saveThenClose(keys: string[], dirtyPaths: string[]) {
+  for (const p of dirtyPaths) await saveFile(p);
+  closeTabsNow(keys);
+}
+
+export function closeOtherTabs(key: string) {
+  const s = store.get();
+  requestCloseTabs(s.tabs.filter((t) => t.key !== key).map((t) => t.key));
+}
+
+export function closeTabsToRight(key: string) {
+  const s = store.get();
+  const idx = s.tabs.findIndex((t) => t.key === key);
+  if (idx === -1) return;
+  requestCloseTabs(s.tabs.slice(idx + 1).map((t) => t.key));
+}
+
+export function closeAllTabs() {
+  requestCloseTabs(store.get().tabs.map((t) => t.key));
+}
+
+export function closeSavedTabs() {
+  const s = store.get();
+  closeTabsNow(s.tabs.filter((t) => t.kind !== "file" || !s.docs[t.path]?.dirty).map((t) => t.key));
 }
 
 export function nextTab(dir = 1) {
@@ -274,13 +726,14 @@ export function markDocDirty(path: string, dirty: boolean) {
 
 export async function saveFile(path?: string) {
   const s = store.get();
+  const root = s.workspace?.root;
   const p = path ?? activeFilePath();
-  if (!p) return;
-  const text = editorManager.getText(p);
+  if (!p || !root) return;
+  const text = editorManager.getText(root, p);
   if (text === null) return;
   const doc = s.docs[p];
   if (doc && !doc.editable && !doc.dirty) return;
-  editorManager.markSelfWrite(p);
+  editorManager.markSelfWrite(root, p);
   try {
     const res = await api.writeFile(p, text);
     const d = store.get().docs[p];
@@ -299,19 +752,21 @@ export async function saveFile(path?: string) {
 
 export function toggleEditMode(path?: string) {
   const p = path ?? activeFilePath();
-  if (!p) return;
+  const root = wsRoot();
+  if (!p || !root) return;
   const d = store.get().docs[p];
   if (!d || d.binary || d.missing) return;
   const editable = !d.editable;
-  editorManager.setEditable(p, editable);
+  editorManager.setEditable(root, p, editable);
   store.set({ docs: { ...store.get().docs, [p]: { ...d, editable } } });
   markUserAction();
 }
 
 export async function reloadFile(path?: string) {
   const p = path ?? activeFilePath();
-  if (!p) return;
-  const res = await editorManager.reloadFromDisk(p, false);
+  const root = wsRoot();
+  if (!p || !root) return;
+  const res = await editorManager.reloadFromDisk(root, p, false);
   const d = store.get().docs[p];
   if (res.status === "reloaded" && d) {
     store.set({
@@ -322,9 +777,14 @@ export async function reloadFile(path?: string) {
           dirty: false,
           conflict: false,
           deletedOnDisk: false,
+          missing: false,
           mtimeMs: res.mtimeMs ?? d.mtimeMs,
         },
       },
+    });
+  } else if (res.status === "gone" && d) {
+    store.set({
+      docs: { ...store.get().docs, [p]: { ...d, deletedOnDisk: true } },
     });
   }
 }
@@ -341,8 +801,74 @@ let followTimer: ReturnType<typeof setTimeout> | null = null;
 const recentExternal = new Map<string, number>();
 let gitRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function applyFsBatch(changes: FsChange[]) {
+export function applyFsBatch(batch: FsBatch) {
   const s = store.get();
+  if (batch.root === s.workspace?.root) {
+    applyFsBatchActive(batch.changes);
+    return;
+  }
+  const snap = s.projectData[batch.root];
+  if (!snap) return;
+  store.set({
+    projectData: { ...s.projectData, [batch.root]: applyFsToSnapshot(snap, batch.changes) },
+  });
+}
+
+/** fs handling for a background project: bookkeeping only — doc content
+ *  reloads are deferred to activation (reconcileOpenDocs). */
+function applyFsToSnapshot(snap: ProjectSnapshot, changes: FsChange[]): ProjectSnapshot {
+  const now = Date.now();
+  const activity = ingestChanges(snap.activity, changes, now);
+
+  const dirInvalidations = { ...snap.dirInvalidations };
+  const bumpDir = (p: string) => {
+    dirInvalidations[p] = (dirInvalidations[p] ?? 0) + 1;
+  };
+  for (const c of changes) {
+    bumpDir(parentOf(c.path));
+    if (c.oldPath) bumpDir(parentOf(c.oldPath));
+    if (c.kind === "deleted" || c.kind === "renamed") {
+      const prefix = (c.oldPath ?? c.path) + "/";
+      for (const dir of Object.keys(snap.expanded)) {
+        if (dir.startsWith(prefix)) bumpDir(dir);
+      }
+    }
+  }
+
+  const docs = { ...snap.docs };
+  let tabs = snap.tabs;
+  let activeTab = snap.activeTab;
+  for (const c of changes) {
+    if (c.kind === "modified" || c.kind === "created") {
+      const d = docs[c.path];
+      if (d?.dirty) docs[c.path] = { ...d, conflict: true };
+      else if (d && !d.missing) docs[c.path] = { ...d, deletedOnDisk: false };
+    } else if (c.kind === "deleted") {
+      const d = docs[c.path];
+      if (d) docs[c.path] = { ...d, deletedOnDisk: true };
+    } else if (c.kind === "renamed" && c.oldPath) {
+      const d = docs[c.oldPath];
+      if (d) {
+        docs[c.path] = { ...d, deletedOnDisk: false };
+        delete docs[c.oldPath];
+        tabs = tabs.map((t) =>
+          t.path === c.oldPath && t.kind === "file"
+            ? { ...t, path: c.path, title: baseName(c.path), key: fileKey(c.path) }
+            : t.path === c.oldPath && t.kind === "diff"
+              ? { ...t, path: c.path, title: `diff: ${baseName(c.path)}` }
+              : t,
+        );
+        if (activeTab === fileKey(c.oldPath)) activeTab = fileKey(c.path);
+      }
+    }
+  }
+
+  return { ...snap, activity, dirInvalidations, docs, tabs, activeTab };
+}
+
+function applyFsBatchActive(changes: FsChange[]) {
+  const s = store.get();
+  const root = s.workspace?.root ?? "";
   const now = Date.now();
 
   // 1. activity timeline
@@ -368,17 +894,18 @@ export function applyFsBatch(changes: FsChange[]) {
   // 3. open docs: reload / conflict / deleted handling
   const docs = { ...s.docs };
   let tabs = s.tabs;
+  let activeTab = s.activeTab;
   for (const c of changes) {
     if (c.kind === "modified" || c.kind === "created") {
       const d = docs[c.path];
       if (d && !d.missing) {
-        if (editorManager.isSelfWrite(c.path)) {
+        if (editorManager.isSelfWrite(root, c.path)) {
           docs[c.path] = { ...d, deletedOnDisk: false };
         } else if (d.dirty) {
           docs[c.path] = { ...d, conflict: true };
         } else {
           // fire-and-forget reload; reloadFromDisk guards against races
-          void editorManager.reloadFromDisk(c.path, false).then((r) => {
+          void editorManager.reloadFromDisk(root, c.path, false).then((r) => {
             const cur = store.get().docs[c.path];
             if (!cur) return;
             if (r.status === "reloaded") {
@@ -407,7 +934,7 @@ export function applyFsBatch(changes: FsChange[]) {
     } else if (c.kind === "renamed" && c.oldPath) {
       const d = docs[c.oldPath];
       if (d) {
-        editorManager.renameDoc(c.oldPath, c.path);
+        editorManager.renameDoc(root, c.oldPath, c.path);
         docs[c.path] = { ...d, deletedOnDisk: false };
         delete docs[c.oldPath];
         tabs = tabs.map((t) =>
@@ -417,6 +944,7 @@ export function applyFsBatch(changes: FsChange[]) {
               ? { ...t, path: c.path, title: `diff: ${baseName(c.path)}` }
               : t,
         );
+        if (activeTab === fileKey(c.oldPath)) activeTab = fileKey(c.path);
       }
     }
   }
@@ -430,7 +958,14 @@ export function applyFsBatch(changes: FsChange[]) {
   const burst = [...recentExternal.values()].filter((t) => now - t < 1200).length;
   scheduleFollow();
 
-  store.set({ activity, dirInvalidations, docs, tabs, followBurst: burst > 4 ? burst : 0 });
+  store.set({
+    activity,
+    dirInvalidations,
+    docs,
+    tabs,
+    activeTab,
+    followBurst: burst > 4 ? burst : 0,
+  });
 }
 
 function scheduleFollow() {
@@ -468,6 +1003,9 @@ export async function refreshGit() {
   if (!store.get().workspace) return;
   try {
     const git = await api.gitStatus();
+    // The user may have switched projects mid-flight — only apply if the
+    // workspace is still the one we queried.
+    if (!store.get().workspace) return;
     store.set({ git });
     void refreshReview(git.changes.length);
   } catch {
@@ -543,17 +1081,22 @@ export function newTerminal(launch?: {
   label?: string;
   /** Workspace-relative cwd — set for worktree sessions. */
   cwd?: string;
+  /** Command typed into the shell right after spawn (confirmed installs). */
+  initCmd?: string;
 }) {
   const s = store.get();
+  if (!s.workspace) return;
   const seq = s.terminalSeq + 1;
   const label = launch?.label ?? launch?.program ?? `${s.shellLabel}`;
-  const session = {
+  const session: TerminalSession = {
     seq,
     label,
     exited: false,
+    wsRoot: s.workspace.root,
     program: launch?.program,
     args: launch?.args,
     cwd: launch?.cwd,
+    initCmd: launch?.initCmd,
   };
   store.set({
     terminals: [...s.terminals, session],
@@ -561,40 +1104,75 @@ export function newTerminal(launch?: {
     terminalSeq: seq,
     terminalVisible: true,
   });
-  pushActivity("terminal", `started ${label}`);
+  store.set({ activity: pushNotice(store.get().activity, "terminal", `started ${label}`) });
   markUserAction();
 }
 
-export function terminalSpawned(seq: number, ptyId: number) {
-  const terminals = store.get().terminals.map((t) => (t.seq === seq ? { ...t, ptyId } : t));
-  store.set({ terminals });
+/** Re-probe PATH for known CLIs (after installs, PATH edits, etc.). */
+export function refreshAgents() {
+  if (!inTauri()) return;
+  void api
+    .detectAgents()
+    .then((agents) => store.set({ agents }))
+    .catch(() => {});
 }
 
-export function terminalExited(ptyId: number, code: number | null) {
-  const s = store.get();
-  const t = s.terminals.find((x) => x.ptyId === ptyId);
-  const terminals = s.terminals.map((x) => (x.ptyId === ptyId ? { ...x, exited: true } : x));
-  store.set({ terminals });
-  pushActivity("exit", `${t?.label ?? "process"} exited${code !== null ? ` (${code})` : ""}`);
+/**
+ * One-click install for a CLI that isn't on PATH. Always asks first —
+ * the confirm dialog shows the exact command, which is then typed into a
+ * fresh interactive terminal so the package manager's prompts (and the
+ * whole install log) happen in the open. Nothing runs silently.
+ */
+export function installAgent(a: AgentInfo) {
+  if (!a.install || a.available) return;
+  const cmd = a.install;
+  askConfirm({
+    title: `Install ${a.name}`,
+    message: `This opens a terminal and runs:\n\n${cmd}\n\nIt needs the matching package manager (npm / pip) already installed and may ask for admin rights.`,
+    buttons: [
+      { label: "Cancel" },
+      {
+        label: `Install ${a.name}`,
+        kind: "primary",
+        onPick: () => newTerminal({ label: `install ${a.id}`, initCmd: cmd }),
+      },
+    ],
+  });
 }
 
 export function closeTerminal(seq: number) {
   const s = store.get();
-  const t = s.terminals.find((x) => x.seq === seq);
-  if (t?.ptyId !== undefined) void api.ptyKill(t.ptyId).catch(() => {});
-  const terminals = s.terminals.filter((x) => x.seq !== seq);
-  const activeTerminal =
-    s.activeTerminal === seq ? (terminals[terminals.length - 1]?.seq ?? null) : s.activeTerminal;
-  store.set({ terminals, activeTerminal });
+  if (s.terminals.some((x) => x.seq === seq)) {
+    disposeTerm(seq);
+    const terminals = s.terminals.filter((x) => x.seq !== seq);
+    const activeTerminal =
+      s.activeTerminal === seq ? (terminals[terminals.length - 1]?.seq ?? null) : s.activeTerminal;
+    store.set({ terminals, activeTerminal });
+    return;
+  }
+  // Maybe it lives in an inactive project's snapshot.
+  for (const [root, snap] of Object.entries(s.projectData)) {
+    if (snap.terminals.some((x) => x.seq === seq)) {
+      disposeTerm(seq);
+      const terminals = snap.terminals.filter((x) => x.seq !== seq);
+      const activeTerminal =
+        snap.activeTerminal === seq
+          ? (terminals[terminals.length - 1]?.seq ?? null)
+          : snap.activeTerminal;
+      store.set({
+        projectData: {
+          ...s.projectData,
+          [root]: { ...snap, terminals, activeTerminal },
+        },
+      });
+      return;
+    }
+  }
 }
 
 export function setActiveTerminal(seq: number) {
   store.set({ activeTerminal: seq });
   markUserAction();
-}
-
-function pushActivity(kind: "terminal" | "exit", detail: string) {
-  store.set({ activity: pushNotice(store.get().activity, kind, detail) });
 }
 
 // ---------- explorer ----------
@@ -667,8 +1245,24 @@ export function cancelSearch() {
 
 // ---------- agent sessions ----------
 
-function applySessions(ev: { sessions: AgentSession[]; collisions: AppState["collisions"] }) {
-  store.set({ sessions: ev.sessions, collisions: ev.collisions });
+function applySessions(ev: {
+  root: string;
+  sessions: AgentSession[];
+  collisions: AppState["collisions"];
+}) {
+  const s = store.get();
+  if (ev.root === s.workspace?.root) {
+    store.set({ sessions: ev.sessions, collisions: ev.collisions });
+    return;
+  }
+  const snap = s.projectData[ev.root];
+  if (!snap) return; // closed or unknown project
+  store.set({
+    projectData: {
+      ...s.projectData,
+      [ev.root]: { ...snap, sessions: ev.sessions, collisions: ev.collisions },
+    },
+  });
 }
 
 /** Focus a session's terminal (spawns a view if the tab was closed). */
@@ -815,7 +1409,9 @@ export function setupBackendListeners() {
   if (wired || !inTauri()) return;
   wired = true;
   void onFsBatch(applyFsBatch);
-  void onGitStale(scheduleGitRefresh);
+  void onGitStale((root) => {
+    if (root === store.get().workspace?.root) scheduleGitRefresh();
+  });
   void onSearchChunk((chunk) => {
     const s = store.get();
     if (chunk.id !== s.search.id) return;
@@ -843,7 +1439,19 @@ export function copyFilePath(path?: string) {
   if (!p) return;
   const ws = store.get().workspace;
   const abs = ws ? `${ws.root}/${p}` : p;
-  void navigator.clipboard?.writeText(abs);
+  void navigator.clipboard?.writeText(abs.replace(/\\/g, "/"));
+}
+
+export function copyRelPath(path?: string) {
+  const p = path ?? activeFilePath();
+  if (!p) return;
+  void navigator.clipboard?.writeText(p);
+}
+
+export function copyProjectPath(root?: string) {
+  const r = root ?? store.get().workspace?.root;
+  if (!r) return;
+  void navigator.clipboard?.writeText(r.replace(/\\/g, "/"));
 }
 
 export function focusSearch() {

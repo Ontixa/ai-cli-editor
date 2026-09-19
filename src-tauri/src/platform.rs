@@ -22,6 +22,12 @@ pub struct AgentInfo {
     /// Resolved executable path if found on PATH.
     pub path: Option<String>,
     pub available: bool,
+    /// Shell command that installs this CLI on the current platform.
+    /// `None` when there is no known public installer — the UI shows the
+    /// install action only when this is `Some`. The command is always
+    /// typed into a real terminal after an explicit user confirmation;
+    /// it is never run silently.
+    pub install: Option<String>,
 }
 
 /// Executable names to probe for, in display order.
@@ -32,7 +38,40 @@ const KNOWN_AGENTS: &[(&str, &str)] = &[
     ("gemini", "Gemini CLI"),
     ("opencode", "OpenCode"),
     ("aider", "Aider"),
+    ("amp", "Amp"),
+    ("qwen", "Qwen Code"),
+    ("crush", "Crush"),
+    ("copilot", "GitHub Copilot"),
 ];
+
+/// The install command for a CLI on THIS platform, resolved at detection
+/// time. Only well-known package-manager commands are offered — anything
+/// else gets `None` and the UI simply shows the agent as not installed.
+/// These run inside an interactive shell so the package manager's own
+/// prompts (sudo, registry auth) work normally.
+fn install_cmd(id: &str) -> Option<String> {
+    let npm = |pkg: &str| Some(format!("npm install -g {pkg}"));
+    match id {
+        "codex" => npm("@openai/codex"),
+        "claude" => npm("@anthropic-ai/claude-code"),
+        "gemini" => npm("@google/gemini-cli"),
+        "opencode" => npm("opencode-ai"),
+        "aider" => Some(
+            if cfg!(windows) {
+                "python -m pip install aider-chat"
+            } else {
+                "python3 -m pip install aider-chat"
+            }
+            .into(),
+        ),
+        "amp" => npm("@sourcegraph/amp"),
+        "qwen" => npm("@qwen-code/qwen-code"),
+        "crush" => npm("@charmland/crush"),
+        "copilot" => npm("@github/copilot"),
+        // Devin CLI has no public package installer.
+        _ => None,
+    }
+}
 
 /// Map a spawned program to a known agent id. Matches the executable
 /// basename (case-insensitive, common shim extensions stripped) so that
@@ -56,6 +95,10 @@ pub fn agent_kind(program: &str) -> &'static str {
         "gemini" => "gemini",
         "opencode" => "opencode",
         "aider" => "aider",
+        "amp" => "amp",
+        "qwen" => "qwen",
+        "crush" => "crush",
+        "copilot" => "copilot",
         "pwsh" | "powershell" | "cmd" | "sh" | "bash" | "zsh" | "fish" | "nu" => "shell",
         _ => "terminal",
     }
@@ -240,6 +283,7 @@ pub fn detect_agents() -> Vec<AgentInfo> {
                 name: name.to_string(),
                 path: found.as_ref().map(|p| p.to_string_lossy().to_string()),
                 available: found.is_some(),
+                install: install_cmd(id),
             }
         })
         .collect()
@@ -272,6 +316,31 @@ mod tests {
         let agents = detect_agents();
         assert_eq!(agents.len(), KNOWN_AGENTS.len());
         assert!(agents.iter().any(|a| a.id == "codex"));
+    }
+
+    #[test]
+    fn agent_kind_covers_catalog() {
+        for (id, _) in KNOWN_AGENTS {
+            assert_eq!(agent_kind(id), *id, "agent_kind({id})");
+        }
+        assert_eq!(agent_kind("claude.cmd"), "claude");
+        assert_eq!(agent_kind("C:\\tools\\Copilot.EXE"), "copilot");
+        assert_eq!(agent_kind("bash"), "shell");
+        assert_eq!(agent_kind("vitest"), "terminal");
+    }
+
+    #[test]
+    fn install_cmds_are_npm_or_pip() {
+        for (id, _) in KNOWN_AGENTS {
+            if let Some(cmd) = install_cmd(id) {
+                assert!(
+                    cmd.starts_with("npm install -g ") || cmd.contains("pip install"),
+                    "unexpected install command for {id}: {cmd}"
+                );
+            }
+        }
+        assert_eq!(install_cmd("devin"), None);
+        assert_eq!(install_cmd("nonexistent"), None);
     }
 
     #[test]

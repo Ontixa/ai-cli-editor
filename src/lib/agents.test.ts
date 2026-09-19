@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { agentName, sessionAge, collisionSummary, REVIEW_LABEL } from "./agents";
+import {
+  agentName,
+  sessionAge,
+  collisionSummary,
+  REVIEW_LABEL,
+  sessionTokens,
+  sessionCost,
+  fmtTokens,
+  fmtCost,
+  usageTotals,
+} from "./agents";
 import type { AgentSession, Collision } from "./types";
 
 function sess(over: Partial<AgentSession>): AgentSession {
@@ -18,6 +28,11 @@ function sess(over: Partial<AgentSession>): AgentSession {
     recentFiles: [],
     commands: [],
     children: [],
+    tokensIn: 0,
+    tokensOut: 0,
+    tokensTotal: 0,
+    costUsd: 0,
+    costEstimated: 0,
     ...over,
   };
 }
@@ -75,6 +90,51 @@ describe("collisionSummary", () => {
       detail: "two sessions share the working tree",
     };
     expect(collisionSummary(c, names)).toBe("two sessions share the working tree");
+  });
+});
+
+describe("usage helpers", () => {
+  it("sessionTokens prefers the explicit total, else in+out", () => {
+    expect(sessionTokens(sess({ tokensTotal: 100, tokensIn: 60, tokensOut: 50 }))).toBe(110);
+    expect(sessionTokens(sess({ tokensTotal: 0, tokensIn: 60, tokensOut: 50 }))).toBe(110);
+    expect(sessionTokens(sess({}))).toBe(0);
+  });
+
+  it("sessionCost prefers reported cost and flags estimates", () => {
+    expect(sessionCost(sess({ costUsd: 0.42, costEstimated: 9 }))).toEqual({
+      usd: 0.42,
+      estimated: false,
+    });
+    expect(sessionCost(sess({ costEstimated: 0.123 }))).toEqual({
+      usd: 0.123,
+      estimated: true,
+    });
+    expect(sessionCost(sess({}))).toBeNull();
+  });
+
+  it("fmtTokens abbreviates k and M", () => {
+    expect(fmtTokens(0)).toBe("0");
+    expect(fmtTokens(999)).toBe("999");
+    expect(fmtTokens(12_345)).toBe("12.3k");
+    expect(fmtTokens(123_456)).toBe("123k");
+    expect(fmtTokens(1_450_000)).toBe("1.45M");
+  });
+
+  it("fmtCost keeps cents precise and marks estimates", () => {
+    expect(fmtCost(0.0042, false)).toBe("$0.0042");
+    expect(fmtCost(1.5, false)).toBe("$1.50");
+    expect(fmtCost(0.42, true)).toBe("≈$0.42");
+  });
+
+  it("usageTotals sums tokens and mixes reported+estimated cost", () => {
+    const t = usageTotals([
+      sess({ tokensTotal: 100, costUsd: 0.5 }),
+      sess({ tokensIn: 40, tokensOut: 20, costEstimated: 0.06 }),
+      sess({}),
+    ]);
+    expect(t.tokens).toBe(160);
+    expect(t.costUsd).toBeCloseTo(0.5);
+    expect(t.costEstimated).toBeCloseTo(0.06);
   });
 });
 
