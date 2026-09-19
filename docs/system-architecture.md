@@ -49,7 +49,7 @@ No network, no plugins beyond `dialog`. The PTY is the integration layer.
 
 | Event            | Payload                          | Purpose                    |
 | ---------------- | -------------------------------- | -------------------------- |
-| `fs:batch`       | `FsChange[]`                     | merged fs changes          |
+| `fs:batch`       | `{ root, changes, rescan? }`     | merged fs changes          |
 | `git:stale`      | `null`                           | hint to refetch git status |
 | `pty:out:N`      | `string` (base64 bytes)          | terminal output            |
 | `pty:exit:N`     | `{ id, code }`                   | process exit               |
@@ -62,13 +62,17 @@ oldPath? }` — workspace-relative, `/`-separated, already deduplicated.
 
 ## Watcher pipeline
 
-notify events → channel → debounce thread:
+notify events → channel → debounce thread (one per workspace root):
 
 - accumulate until 120 ms quiet or 400 ms since first event
 - drop ignored components (`.git` always; default noise dirs)
 - merge per path: create+modify→created, create+delete→nothing,
   modify+delete→deleted, delete+create→created, rename pairs fold
 - apply to file index synchronously, then emit `fs:batch` + `git:stale`
+- the backlog channel is bounded; on `TryRecv` overflow or a notify
+  error the batch emits `rescan: true` — the backend resets the file
+  index and the frontend invalidates expanded dirs, reconciles open
+  docs, refetches git state, and logs a rescan notice in Activity
 
 ## PTY lifecycle
 
@@ -95,15 +99,36 @@ command runs, child processes, git summary.
   live sessions. A session claims a path directly when its `relPrefix`
   contains it (most specific root wins); sessions sharing the same root get
   `ambiguous` instead of a guess.
-- **Process observation** — `procmon` polls `sysinfo` every ~1.5 s while any
-  session is live, walks only descendants of app-spawned PIDs (depth ≤ 8,
-  ≤ 32 children/session), classifies children as test/build/tool/agent, and
-  records exit codes where the OS reports them. No global process scans.
+- **Process observation** — `procmon` polls `sysinfo` while any session is
+  live: ~1.5 s for the visible workspace, a slower tier (~6 s) for
+  background project tabs. It walks only descendants of app-spawned PIDs
+  (depth ≤ 8, ≤ 32 children/session), records per-session CPU%/RSS as
+  `Option` (unknown ≠ 0), classifies children as test/build/tool/agent,
+  and records exit codes where the OS reports them. PID reuse is guarded
+  by comparing process start-times — a recycled pid is never attributed
+  to a dead session. No global process scans.
+- **Usage metering** — `meter.rs` is a byte-buffered state machine fed
+  raw PTY output (UTF-8/ANSI splits across chunks are safe). Only
+  `\n`-terminated lines count; `\r` fragments are in-place redraws and
+  `\r\n` is committed. Cumulative reports are tracked per report-family
+  key: a lower value than last seen folds the epoch into a base and a
+  repeated equal value is a no-op; identical per-message deltas always
+  count (no global dedupe). Cache-read and cache-write are separate
+  counters; `tokensTotal` is `max(reported, in+out)` so an explicit total
+  never stacks on top of its own components. `sources` records which
+  report families contributed. Cost: the CLI's own reported `$` wins;
+  otherwise a static per-model price table produces an estimate only
+  when the CLI named a known model. `flush()` at exit counts a final
+  unterminated report line.
 - **Collisions** — recomputed on each snapshot: two live sessions touching
   the same file, or sharing a working tree root, produce a bounded
   `Collision` advisory. Worktree isolation naturally avoids them.
-- **Persistence** — `sessions.json` `{ "version": 2, "sessions": [...] }`,
-  tmp+rename, capped history; corrupt/incompatible → empty.
+- **Persistence** — `sessions.json` `{ "version": 2, "sessions": [...],
+"usage": {...} }`, tmp+rename, capped history; corrupt/incompatible →
+  empty. Finalized per-agent usage counters persist beside sessions;
+  `metered_final` on each archived session marks whether its usage was
+  already folded in, so restore can't double-count. Legacy
+  `tokensCached` migrates into `tokensCacheRead`.
 
 ## Worktrees, checkpoints, review
 

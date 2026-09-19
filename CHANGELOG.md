@@ -4,6 +4,59 @@ All notable changes to this project will be documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — editor-reliability
+
+### Added
+
+- **Cache-read vs cache-write token counters** — separate fields through
+  meter → session snapshot → persisted archive → UI; legacy
+  `tokensCached` archives migrate into `tokensCacheRead`.
+- **Usage provenance** — each session records which report families
+  contributed (`tokens used`, `cache read`, …); shown on session cards
+  and in exports.
+- **Per-session CPU%/RSS** — conservative sysinfo sampling, `Option`
+  values shown as `—` when unknown; two-tier polling (~1.5 s visible
+  workspace, ~6 s hidden project tabs).
+- **PID-reuse guard** — process start-times are recorded at spawn and
+  checked on each procmon pass so a recycled PID is never attributed to
+  a dead session.
+- **Session export** — `session_export` command + Agents-panel button
+  copy a structured JSON summary (root/worktree, git, files, commands,
+  usage + provenance); never terminal output or file contents.
+- **Session templates** — structured `program + argv[]` launchers with
+  optional cwd and an optional test command typed into the PTY on
+  demand; no shell-string interpolation.
+- **Watcher rescan** — bounded backlog; overflow/notify-error emits
+  `rescan: true`, resets the file index, invalidates frontend dir/doc
+  state, refetches git, and logs an Activity notice.
+- **Close confirmation** — closing a project tab with live sessions asks
+  first; close kills only app-spawned PTYs.
+- **PTY-backed e2e suite** (`tests/session_e2e.rs`) — real ConPTY
+  sessions through `SessionRegistry`: metering + exit finalization,
+  identical-delta double counting, workspace isolation, stale-restore
+  without double counting, ~2 MB output burst, detach-on-close.
+  Harness answers ConPTY's DSR query like a real terminal.
+
+### Fixed
+
+- **Meter correctness** — byte-buffered feed handles UTF-8/ANSI split
+  across PTY chunks; only `\n`-committed lines advance counters (`\r`
+  redraws are in-place repaints, `\r\n` commits); cumulative reports are
+  tracked per report-family key so a counter reset folds a new epoch
+  instead of dropping or double-counting, while identical repaints are
+  no-ops; `tokensTotal` uses `max(reported, in+out)` so explicit totals
+  no longer stack on their own components; unterminated trailing output
+  is flushed at exit.
+- **Honest cost** — estimates are keyed on the CLI-reported model via a
+  static price table; unknown model → no estimate instead of a guess.
+- **Restore can't double-count** — `metered_final` rides the archive;
+  re-restoring the same `sessions.json` (crash between save steps) is a
+  no-op. Restored sessions stay `stale` — no pid, no PTY, never live.
+- **Unknown ≠ 0** — CPU/memory/model/context render `—` when the OS or
+  CLI didn't report a value.
+- Exit events arriving before PTY registration are stashed and applied
+  at `spawn` (instant-exit race).
+
 ## [0.2.0] — Agent Workspace
 
 ### Added

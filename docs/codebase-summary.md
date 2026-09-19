@@ -2,25 +2,26 @@
 
 ## Backend (`src-tauri/src/`)
 
-| File            | Responsibility                                                                                 |
-| --------------- | ---------------------------------------------------------------------------------------------- |
-| `main.rs`       | entry → `lib::run()`                                                                           |
-| `lib.rs`        | `AppState`, all `#[tauri::command]`s, builder wiring                                           |
-| `error.rs`      | `AppError` (serde string), `AppResult`                                                         |
-| `paths.rs`      | `normalize`, `resolve_existing`, `resolve_for_write`, `rel_of` — workspace containment         |
-| `fs_ops.rs`     | `list_dir` (lazy, sorted), `read_file` (8 MB cap, binary sniff), `write_file`                  |
-| `watcher.rs`    | notify → debounce/merge → `fs:batch`; `merge_raw_events` is pure/tested                        |
-| `index.rs`      | `FileIndex` — quick-open path list, watcher-patched                                            |
-| `pty.rs`        | `PtyRegistry`, `SpawnSpec`, reader+waiter threads, base64 out                                  |
-| `session.rs`    | `AgentSession` registry: lifecycle, file attribution, collisions, git summary, bounded history |
-| `procmon.rs`    | descendant-only process monitor (sysinfo), command classification, exit codes                  |
-| `worktree.rs`   | `git worktree` create/list/remove/prune under `.worktrees/`, dirty protection                  |
-| `checkpoint.rs` | Git-native patch + metadata snapshots under `<git-dir>/aice-checkpoints/`; safe restore        |
-| `review.rs`     | deterministic per-file review classification (path + content heuristics)                       |
-| `git.rs`        | `status` (porcelain v2 -z), `diff` (git binary / similar)                                      |
-| `search.rs`     | `rg --null` streaming chunks; bounded walk fallback                                            |
-| `platform.rs`   | `default_shell`, `detect_agents`, PATH probing, per-process exit code                          |
-| `persist.rs`    | `load`/`save` JSON state + `sessions.json` (v2), atomic-ish rename                             |
+| File            | Responsibility                                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `main.rs`       | entry → `lib::run()`                                                                                             |
+| `lib.rs`        | `AppState`, all `#[tauri::command]`s, builder wiring                                                             |
+| `error.rs`      | `AppError` (serde string), `AppResult`                                                                           |
+| `paths.rs`      | `normalize`, `resolve_existing`, `resolve_for_write`, `rel_of` — workspace containment                           |
+| `fs_ops.rs`     | `list_dir` (lazy, sorted), `read_file` (8 MB cap, binary sniff), `write_file`                                    |
+| `watcher.rs`    | notify → debounce/merge → `fs:batch {root, changes, rescan?}`; bounded backlog + rescan signal                   |
+| `index.rs`      | `FileIndex` — quick-open path list, watcher-patched                                                              |
+| `pty.rs`        | `PtyRegistry`, `SpawnSpec`, reader+waiter threads, base64 out                                                    |
+| `session.rs`    | `AgentSession` registry: lifecycle, attribution, collisions, git summary, usage/CPU/RSS, export, bounded history |
+| `meter.rs`      | byte-buffered token/cost meter: per-key epoch rollover, `\n`-commit semantics, provenance                        |
+| `procmon.rs`    | descendant-only process monitor (sysinfo), two-tier sampling, pid-reuse guard, exit codes                        |
+| `worktree.rs`   | `git worktree` create/list/remove/prune under `.worktrees/`, dirty protection                                    |
+| `checkpoint.rs` | Git-native patch + metadata snapshots under `<git-dir>/aice-checkpoints/`; safe restore                          |
+| `review.rs`     | deterministic per-file review classification (path + content heuristics)                                         |
+| `git.rs`        | `status` (porcelain v2 -z), `diff` (git binary / similar)                                                        |
+| `search.rs`     | `rg --null` streaming chunks; bounded walk fallback                                                              |
+| `platform.rs`   | `default_shell`, `detect_agents`, PATH probing, per-process exit code                                            |
+| `persist.rs`    | `load`/`save` JSON state + `sessions.json` (v2), atomic-ish rename                                               |
 
 ## Frontend (`src/`)
 

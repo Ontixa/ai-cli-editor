@@ -80,10 +80,36 @@ tree, a real diff — and stays fast and stable through long agent sessions.
   codex's `tokens used` + `% context left` footer + `model:` banner,
   Claude's `/cost` table incl. cache-read tokens, Gemini's `/stats`)
   and shows them live on each session card — model, context remaining,
-  in/out/cached token breakdown, reported cost or a clearly-marked `≈`
-  estimate from a static price table. Per-project totals sit in the
-  status bar; **all-time totals per CLI** live in the Agents panel and
-  persist across restarts in `sessions.json`.
+  in/out token split, **cache-read vs cache-write** counters, reported
+  cost or a clearly-marked `≈` estimate from a static price table, and a
+  provenance list of which report families contributed. Per-project
+  totals sit in the status bar; **all-time totals per CLI** live in the
+  Agents panel and persist across restarts in `sessions.json`.
+  Metering rules: cumulative reports are tracked per report-family and
+  fold into a new epoch when the counter resets (e.g. the CLI restarts
+  inside the same PTY); repaints of the same value never double-count;
+  per-message deltas count on each committed line, so two identical
+  requests still count twice. `\r` redraws never advance counters —
+  only newline-terminated output does. If the CLI doesn't name its
+  model, no cost is estimated rather than guessing a price.
+- **Session cards show resources** — per-session CPU % and memory when
+  the OS reports them, with `—` for unknown instead of a fake `0`.
+  Background project tabs sample at a lower rate.
+- **Session export** — one click copies a structured JSON summary
+  (root/worktree, git state, touched files, command runs, usage +
+  provenance) to the clipboard; terminal output and file contents are
+  never exported.
+- **Session templates** — the Agents panel can keep named launchers as
+  structured `program + argv[]` + optional cwd + an optional test
+  command that is typed into the terminal only when you press it. No
+  shell string interpolation of repo or branch names.
+- **Watcher rescan** — if the OS overflows the fs-event queue, the app
+  resets its file index, invalidates expanded folders and open docs,
+  refetches git state, and logs a rescan notice in Agent Activity
+  instead of silently missing changes.
+- **Safe workspace close** — closing a project tab with live sessions
+  asks for confirmation; closing kills only PTYs the app itself spawned
+  (PID reuse is guarded by process start-time).
 - **Live file watching** — creations, edits, deletes and renames land in the
   tree, the Changes panel, Agent Activity, and session attribution the
   moment they happen.
@@ -208,8 +234,21 @@ Events are typed contracts (`fs:batch`, `pty:out:<id>`, `search:chunk`,
 - **File attribution is best-effort.** Two agents in the same directory make
   per-file attribution ambiguous; the UI says so instead of guessing.
 - **Process observation is best-effort.** Only descendants of app-spawned
-  PTYs are watched; exit codes depend on what the OS reports. Windows is the
-  primary target; Linux/macOS use the same abstractions.
+  PTYs are watched; exit codes depend on what the OS reports. CPU/memory
+  are shown as `—` when the OS won't say. Windows is the primary target;
+  Linux/macOS use the same abstractions.
+- **Token telemetry is scraped from PTY text.** The meter recognizes the
+  report formats listed above; a CLI that prints nothing recognizable
+  simply shows no usage — output is never fabricated. Cost shown without
+  `≈` is what the CLI itself reported; `≈` is an estimate from a static
+  price table keyed on the reported model — it is not your bill, and
+  subscription pricing is unknown to the app. Tokens a CLI reports
+  without labels are trusted at face value; provenance per session lists
+  which report families contributed.
+- **Restored sessions are history.** After a restart, prior sessions come
+  back as `stale` metadata — no pid, no PTY, not live. Their usage is
+  folded into all-time totals exactly once (`metered_final` flag), so a
+  crash between save steps can't double-count.
 - **Collision detection is advisory.** It flags shared files/trees; it does
   not predict merge conflicts.
 - **Checkpoints are not commits.** They overlay a saved patch onto the
