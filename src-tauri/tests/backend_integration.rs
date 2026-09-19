@@ -139,8 +139,8 @@ fn pty_write_and_kill() {
 #[test]
 fn watcher_reports_created_and_modified() {
     let dir = fresh_dir("watch");
-    let (tx, rx) = channel::<Vec<watcher::FsChange>>();
-    let emit = Arc::new(move |batch: Vec<watcher::FsChange>| {
+    let (tx, rx) = channel::<watcher::FsBatch>();
+    let emit = Arc::new(move |batch: watcher::FsBatch| {
         let _ = tx.send(batch);
     });
 
@@ -150,31 +150,24 @@ fn watcher_reports_created_and_modified() {
 
     std::fs::write(dir.join("newfile.rs"), b"fn main() {}\n").unwrap();
 
-    let found_create = wait_for(
-        &rx,
-        &mut |batch: &Vec<watcher::FsChange>| {
-            batch.iter().any(|c| {
-                c.path == "newfile.rs"
-                    && matches!(
-                        c.kind,
-                        watcher::ChangeKind::Created | watcher::ChangeKind::Modified
-                    )
-            })
-        },
-        10,
-    );
+    let found_create = wait_for(&rx, &mut |batch: &watcher::FsBatch| {
+        batch.changes.iter().any(|c| {
+            c.path == "newfile.rs"
+                && matches!(
+                    c.kind,
+                    watcher::ChangeKind::Created | watcher::ChangeKind::Modified
+                )
+        })
+    }, 10);
     assert!(found_create, "watcher did not report newfile.rs change");
 
     std::fs::write(dir.join("newfile.rs"), b"fn main() { /*v2*/ }\n").unwrap();
-    let found_modify = wait_for(
-        &rx,
-        &mut |batch: &Vec<watcher::FsChange>| {
-            batch
-                .iter()
-                .any(|c| c.path == "newfile.rs" && c.kind == watcher::ChangeKind::Modified)
-        },
-        10,
-    );
+    let found_modify = wait_for(&rx, &mut |batch: &watcher::FsBatch| {
+        batch
+            .changes
+            .iter()
+            .any(|c| c.path == "newfile.rs" && c.kind == watcher::ChangeKind::Modified)
+    }, 10);
     assert!(found_modify, "watcher did not report modification");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -534,7 +527,7 @@ fn worktree_dirty_refuses_then_force_removes() {
     assert!(!dir.join(".worktrees/d1").exists());
 
     // The main checkout can never be removed.
-    assert!(worktree::remove(&dir, ".", true).is_err() || true);
+    assert!(worktree::remove(&dir, ".", true).is_err());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -19,6 +19,10 @@ use std::time::{Duration, Instant};
 const QUIET_MS: u64 = 120;
 /// Maximum time a batch may accumulate before flushing anyway.
 const MAX_BATCH_MS: u64 = 400;
+/// Hard bound on raw events buffered between flushes — beyond this the
+/// merge can't be trusted to represent the tree, so the batch converts to
+/// a rescan signal instead of silently dropping changes.
+const RAW_CAP: usize = 10_000;
 
 /// Directory names never surfaced as change events. `.git` is mandatory;
 /// the rest are default noise reducers (a settings surface can override later).
@@ -66,6 +70,27 @@ pub enum RawEvent {
     Rename { from: String, to: String },
     RenameFrom(String),
     RenameTo(String),
+}
+
+/// What the debounce loop hands downstream: merged changes, plus `rescan`
+/// when the OS event queue overflowed or the backlog bound tripped.
+/// A rescan means "some events were lost — re-read the tree" rather than
+/// a guessed change set; consumers must rebuild derived state (index,
+/// explorer dirs, git status, open-doc existence).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsBatch {
+    pub changes: Vec<FsChange>,
+    #[serde(default)]
+    pub rescan: bool,
+}
+
+/// Channel payload inside the watcher — real events, or an overflow
+/// signal from the notify backend (ReadDirectoryChangesW overrun,
+/// inotify queue full, FSEvents must-scan flags all arrive as errors).
+enum RawMsg {
+    Events(Vec<RawEvent>),
+    Rescan,
 }
 
 enum Slot {
@@ -243,8 +268,10 @@ fn raw_from_event(root: &Path, ev: &Event) -> Vec<RawEvent> {
     }
 }
 
-/// Callback invoked with each merged batch (used to keep the file index hot).
-pub type BatchHook = Arc<dyn Fn(&[FsChange]) + Send + Sync>;
+/// Callback invoked with each merged batch (used to keep the file index
+/// hot). A `rescan` batch means "rebuild from disk" — its `changes` are
+/// only the events that survived before the overflow.
+pub type BatchHook = Arc<dyn Fn(&FsBatch) + Send + Sync>;
 
 /// Handle for a running watcher; dropping stops watching. The debounce
 /// thread exits when the watcher is dropped (channel closes).
@@ -258,17 +285,24 @@ pub struct FsWatcher {
 /// (index update) — keep it fast.
 pub fn start(
     root: PathBuf,
-    emit: Arc<dyn Fn(Vec<FsChange>) + Send + Sync>,
+    emit: Arc<dyn Fn(FsBatch) + Send + Sync>,
     hook: Option<BatchHook>,
 ) -> Result<FsWatcher, notify::Error> {
-    let (tx, rx) = channel::<Vec<RawEvent>>();
+    let (tx, rx) = channel::<RawMsg>();
 
     let watch_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-        if let Ok(ev) = res {
-            let raws = raw_from_event(&watch_root, &ev);
-            if !raws.is_empty() {
-                let _ = tx.send(raws);
+        match res {
+            Ok(ev) => {
+                let raws = raw_from_event(&watch_root, &ev);
+                if !raws.is_empty() {
+                    let _ = tx.send(RawMsg::Events(raws));
+                }
+            }
+            Err(_) => {
+                // OS reported lost events (queue overflow etc.) — ask for
+                // a rescan rather than pretend the merged view is complete.
+                let _ = tx.send(RawMsg::Rescan);
             }
         }
     })?;
@@ -282,14 +316,38 @@ pub fn start(
 }
 
 /// Collect raw events until quiet for QUIET_MS or MAX_BATCH_MS total,
-/// then merge + dispatch. Repeats until the channel closes.
+/// then merge + dispatch. Overflow signals fold into the batch's `rescan`
+/// flag; the backlog is bounded by RAW_CAP — tripping it converts the
+/// batch into a rescan instead of letting memory grow unboundedly.
+/// Repeats until the channel closes.
 fn debounce_loop(
-    rx: Receiver<Vec<RawEvent>>,
-    emit: Arc<dyn Fn(Vec<FsChange>) + Send + Sync>,
+    rx: Receiver<RawMsg>,
+    emit: Arc<dyn Fn(FsBatch) + Send + Sync>,
     hook: Option<BatchHook>,
 ) {
+    fn dispatch(buf: &mut Vec<RawEvent>, rescan: bool, hook: &Option<BatchHook>, emit: &Arc<dyn Fn(FsBatch) + Send + Sync>) {
+        let mut merged = merge_raw_events(std::mem::take(buf));
+        merged.truncate(4_096); // a batch this big isn't actionable anyway
+        if merged.is_empty() && !rescan {
+            return;
+        }
+        let batch = FsBatch {
+            changes: merged,
+            rescan,
+        };
+        if let Some(h) = hook {
+            h(&batch);
+        }
+        emit(batch);
+    }
+
     while let Ok(first) = rx.recv() {
-        let mut buf = first;
+        let mut buf = Vec::new();
+        let mut rescan = false;
+        match first {
+            RawMsg::Events(evs) => buf = evs,
+            RawMsg::Rescan => rescan = true,
+        }
         let started = Instant::now();
         loop {
             let quiet = Duration::from_millis(QUIET_MS);
@@ -300,28 +358,24 @@ fn debounce_loop(
             }
             let wait = quiet.min(cap - elapsed);
             match rx.recv_timeout(wait) {
-                Ok(more) => buf.extend(more),
+                Ok(RawMsg::Events(more)) => {
+                    if buf.len() + more.len() > RAW_CAP {
+                        rescan = true;
+                        buf.clear();
+                    } else {
+                        buf.extend(more);
+                    }
+                }
+                Ok(RawMsg::Rescan) => rescan = true,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // flush what we have, then exit
-                    let merged = merge_raw_events(std::mem::take(&mut buf));
-                    if !merged.is_empty() {
-                        if let Some(h) = &hook {
-                            h(&merged);
-                        }
-                        emit(merged);
-                    }
+                    dispatch(&mut buf, rescan, &hook, &emit);
                     return;
                 }
             }
         }
-        let merged = merge_raw_events(std::mem::take(&mut buf));
-        if !merged.is_empty() {
-            if let Some(h) = &hook {
-                h(&merged);
-            }
-            emit(merged);
-        }
+        dispatch(&mut buf, rescan, &hook, &emit);
     }
 }
 
@@ -437,5 +491,66 @@ mod tests {
         assert!(is_ignored_rel(".git/index"));
         assert!(is_ignored_rel("a/target/bin"));
         assert!(!is_ignored_rel("src/main.rs"));
+    }
+
+    // ---------- overflow / rescan ----------
+
+    /// Drive the debounce loop with a controlled channel.
+    fn pump(
+        send: Vec<RawMsg>,
+    ) -> (
+        std::sync::mpsc::Receiver<FsBatch>,
+        thread::JoinHandle<()>,
+    ) {
+        let (tx, rx) = channel::<RawMsg>();
+        let (otx, orx) = channel::<FsBatch>();
+        let emit = Arc::new(move |b: FsBatch| {
+            let _ = otx.send(b);
+        });
+        let h = thread::spawn(move || debounce_loop(rx, emit, None));
+        for m in send {
+            tx.send(m).unwrap();
+        }
+        drop(tx);
+        (orx, h)
+    }
+
+    #[test]
+    fn rescan_signal_survives_debounce() {
+        let (rx, h) = pump(vec![
+            RawMsg::Rescan,
+            RawMsg::Events(vec![Create("a.rs".into())]),
+        ]);
+        let b = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(b.rescan);
+        assert!(b.changes.iter().any(|c| c.path == "a.rs"));
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn backlog_cap_forces_rescan() {
+        // Two sends that together exceed RAW_CAP: the second can't be
+        // trusted as a complete merge, so the batch becomes a rescan.
+        let big1: Vec<RawEvent> = (0..9_000)
+            .map(|i| Create(format!("f{i}.rs")))
+            .collect();
+        let big2: Vec<RawEvent> = (0..2_000)
+            .map(|i| Create(format!("g{i}.rs")))
+            .collect();
+        let (rx, h) = pump(vec![RawMsg::Events(big1), RawMsg::Events(big2)]);
+        let b = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(b.rescan, "overflow must produce a rescan batch");
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn rescan_with_no_changes_still_emits() {
+        // A pure overflow with zero surviving events must still notify —
+        // otherwise the frontend would never learn it lost events.
+        let (rx, h) = pump(vec![RawMsg::Rescan]);
+        let b = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(b.rescan);
+        assert!(b.changes.is_empty());
+        h.join().unwrap();
     }
 }

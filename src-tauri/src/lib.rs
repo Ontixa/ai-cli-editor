@@ -39,7 +39,9 @@ struct WsEntry {
 
 pub struct AppState {
     /// Active workspace — all fs/git/search commands resolve against it.
-    root: Mutex<Option<PathBuf>>,
+    /// Shared with the process monitor so it can sample hidden project
+    /// tabs at a lower rate.
+    root: Arc<Mutex<Option<PathBuf>>>,
     /// Open workspaces keyed by canonical root (project tabs).
     workspaces: Mutex<HashMap<PathBuf, WsEntry>>,
     ptys: pty::PtyRegistry,
@@ -57,7 +59,7 @@ pub struct AppState {
 impl AppState {
     fn new() -> Self {
         Self {
-            root: Mutex::new(None),
+            root: Arc::new(Mutex::new(None)),
             workspaces: Mutex::new(HashMap::new()),
             ptys: pty::PtyRegistry::new(),
             search: search::SearchRegistry::new(),
@@ -183,6 +185,7 @@ fn open_workspace(
                 let emit_app = app.clone();
                 *pm = Some(procmon::start(
                     state.sessions.clone(),
+                    state.root.clone(),
                     Arc::new(move || {
                         emit_sessions_all(&emit_app, false);
                     }),
@@ -194,14 +197,17 @@ fn open_workspace(
         // route each batch to the right project tab.
         let emit_app = app.clone();
         let emit_root = root.clone();
-        let emit = Arc::new(move |changes: Vec<watcher::FsChange>| {
+        let emit = Arc::new(move |batch: watcher::FsBatch| {
             let _ = emit_app.emit(
                 "fs:batch",
                 &serde_json::json!({
                     "root": emit_root.to_string_lossy(),
-                    "changes": changes,
+                    "changes": batch.changes,
+                    "rescan": batch.rescan,
                 }),
             );
+            // Git stays stale-flagged on rescan too — overflow means some
+            // changes never reached us.
             let _ = emit_app.emit(
                 "git:stale",
                 &serde_json::json!({ "root": emit_root.to_string_lossy() }),
@@ -209,25 +215,30 @@ fn open_workspace(
         });
 
         // Index + session hook, scoped to this workspace's root so file
-        // touches never leak across projects.
+        // touches never leak across projects. A rescan batch means the
+        // index can't be patched incrementally — drop it so the next
+        // list() walks the real tree.
         let hook_app = app.clone();
         let hook_root = root.clone();
-        let hook: watcher::BatchHook = Arc::new(move |changes| {
+        let hook: watcher::BatchHook = Arc::new(move |batch| {
             let st = hook_app.state::<AppState>();
             {
                 let ws = st.workspaces.lock().unwrap();
                 if let Some(entry) = ws.get(&hook_root) {
-                    entry.index.apply(changes);
+                    if batch.rescan {
+                        entry.index.reset();
+                    }
+                    entry.index.apply(&batch.changes);
                 }
             }
             let root_str = hook_root.to_string_lossy().to_string();
-            let mut mutated = st.sessions.note_fs_changes(&root_str, changes);
-            for sid in st.sessions.refresh_git_for_paths(&root_str, changes) {
+            let mut mutated = st.sessions.note_fs_changes(&root_str, &batch.changes);
+            for sid in st.sessions.refresh_git_for_paths(&root_str, &batch.changes) {
                 if st.sessions.refresh_git(&sid, false) {
                     mutated = true;
                 }
             }
-            if mutated {
+            if mutated || batch.rescan {
                 emit_sessions(&hook_app, &hook_root, false);
                 persist_sessions(&hook_app, false);
             }
@@ -684,6 +695,13 @@ fn session_files(state: State<AppState>, id: String) -> AppResult<Vec<session::F
     state.sessions.touched_files(&id)
 }
 
+/// Compact JSON export of one session (files/commands/usage + provenance).
+/// No raw terminal output, no file contents — metadata only.
+#[tauri::command]
+fn session_export(state: State<AppState>, id: String) -> AppResult<serde_json::Value> {
+    state.sessions.export(&id)
+}
+
 // ---------- worktrees ----------
 
 #[tauri::command]
@@ -886,6 +904,7 @@ pub fn run() {
             session_rename,
             session_stop,
             session_files,
+            session_export,
             worktree_list,
             worktree_create,
             worktree_remove,

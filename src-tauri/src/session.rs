@@ -87,12 +87,35 @@ pub struct CommandRun {
     pub running: bool,
 }
 
-/// Currently-alive descendant process.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Currently-alive descendant process, with resource usage when the OS
+/// shares it. Metrics are rounded (cpu → 0.5%, mem → 64KiB) so jitter
+/// doesn't re-render the UI every poll.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildProc {
     pub pid: u32,
     pub name: String,
+    /// CPU% of this process alone (can exceed 100 on multicore).
+    #[serde(default)]
+    pub cpu_pct: f32,
+    /// Resident memory in bytes.
+    #[serde(default)]
+    pub mem_bytes: u64,
+}
+
+/// One process-monitor sample for a session — everything procmon learned
+/// about the session's process tree this tick.
+pub struct ProcSample {
+    /// Every descendant of the session's root pid (bounded depth/count).
+    pub descendants: Vec<ChildProc>,
+    /// CPU% of root process + descendants. None when the root pid is gone
+    /// or the OS refuses metrics — unknown is never reported as 0.
+    pub cpu_pct: Option<f32>,
+    /// Resident bytes of root process + descendants (same caveat).
+    pub mem_bytes: Option<u64>,
+    /// OS start-time of the process currently at the session's root pid.
+    /// Compared against the previously recorded value to detect PID reuse.
+    pub root_start: Option<u64>,
 }
 
 /// Cheap per-session git summary, refreshed on a throttle.
@@ -138,17 +161,28 @@ pub struct SessionSnapshot {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub tokens_total: u64,
-    /// Prompt-cache read/creation tokens the CLI reported.
-    pub tokens_cached: u64,
+    /// Prompt-cache read tokens the CLI reported (billed cheaper).
+    pub tokens_cache_read: u64,
+    /// Prompt-cache write/creation tokens the CLI reported.
+    pub tokens_cache_write: u64,
+    /// Which report families produced the numbers — lets the UI tell a
+    /// keyed billing report from the low-confidence "N tokens" fallback.
+    pub usage_sources: Vec<String>,
     /// USD cost the CLI itself printed — the exact figure.
     pub cost_usd: f64,
     /// Derived from the static price table when the CLI reports tokens but
-    /// no cost. UI shows this as `≈$x` — it is an estimate, not a bill.
-    pub cost_estimated: f64,
+    /// no cost AND announced a priced model. `None` = unknown — the UI
+    /// shows "unknown", never a self-assigned guess.
+    pub cost_estimated: Option<f64>,
     /// Model identifier the CLI announced on its output, when known.
     pub model: Option<String>,
     /// Latest "% context left" the CLI reported, when it reports one.
     pub context_left_pct: Option<f64>,
+    /// CPU% of the session's process tree when measurable (root process
+    /// included; may exceed 100). `None` = not measurable right now.
+    pub cpu_pct: Option<f32>,
+    /// Resident bytes of the session's process tree when measurable.
+    pub mem_bytes: Option<u64>,
 }
 
 /// Accumulated usage for one agent kind (or the grand total): the
@@ -158,29 +192,46 @@ pub struct SessionSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsage {
     /// Sessions that contributed to this counter.
+    #[serde(default)]
     pub sessions: u64,
+    #[serde(default)]
     pub tokens_in: u64,
+    #[serde(default)]
     pub tokens_out: u64,
+    #[serde(default)]
     pub tokens_total: u64,
-    pub tokens_cached: u64,
+    /// Prompt-cache read tokens. `alias` folds the pre-split
+    /// `tokensCached` field of archives written by older versions into
+    /// this counter on load (reads are the dominant share); it is never
+    /// written back out.
+    #[serde(default, alias = "tokensCached")]
+    pub tokens_cache_read: u64,
+    /// Prompt-cache write/creation tokens.
+    #[serde(default)]
+    pub tokens_cache_write: u64,
     /// Reported (exact) USD.
+    #[serde(default)]
     pub cost_usd: f64,
     /// Estimated USD for sessions whose CLI reports tokens but no cost.
+    /// Sessions with unknown/unpriced models contribute 0 here — the
+    /// estimate is only as good as the price table it came from.
     #[serde(default)]
     pub cost_estimated: f64,
 }
 
 impl AgentUsage {
-    /// Fold one session's meter in. `agent` prices the estimate — kept
-    /// per-session so mixed reported/estimated sessions stay honest.
-    fn add(&mut self, agent: &str, m: &crate::meter::Meter) {
+    /// Fold one session's meter in. The estimate is priced by the model
+    /// the CLI itself announced, so unknown models contribute nothing —
+    /// never a guessed figure.
+    fn add(&mut self, m: &crate::meter::Meter) {
         self.sessions += 1;
-        self.tokens_in += m.tokens_in;
-        self.tokens_out += m.tokens_out;
-        self.tokens_total += m.tokens_total;
-        self.tokens_cached += m.tokens_cached;
-        self.cost_usd += m.cost_usd;
-        self.cost_estimated += m.estimated_cost(agent).unwrap_or(0.0);
+        self.tokens_in += m.tokens_in();
+        self.tokens_out += m.tokens_out();
+        self.tokens_total += m.tokens_total();
+        self.tokens_cache_read += m.tokens_cache_read();
+        self.tokens_cache_write += m.tokens_cache_write();
+        self.cost_usd += m.cost_usd();
+        self.cost_estimated += m.estimated_cost().unwrap_or(0.0);
     }
 
     fn accumulate(&mut self, o: &AgentUsage) {
@@ -188,13 +239,15 @@ impl AgentUsage {
         self.tokens_in += o.tokens_in;
         self.tokens_out += o.tokens_out;
         self.tokens_total += o.tokens_total;
-        self.tokens_cached += o.tokens_cached;
+        self.tokens_cache_read += o.tokens_cache_read;
+        self.tokens_cache_write += o.tokens_cache_write;
         self.cost_usd += o.cost_usd;
         self.cost_estimated += o.cost_estimated;
     }
 
     fn has_usage(&self) -> bool {
-        self.tokens_in + self.tokens_out + self.tokens_total + self.tokens_cached > 0
+        self.tokens_in + self.tokens_out + self.tokens_total > 0
+            || self.tokens_cache_read + self.tokens_cache_write > 0
             || self.cost_usd > 0.0
             || self.cost_estimated > 0.0
     }
@@ -260,6 +313,13 @@ struct AgentSession {
     children: Vec<ChildProc>,
     git: Option<SessionGit>,
     git_at: u64,
+    /// CPU% of the process tree at last procmon sample (root included).
+    cpu_pct: Option<f32>,
+    /// Resident bytes of the process tree at last procmon sample.
+    mem_bytes: Option<u64>,
+    /// OS start-time of the process at `pid` — PID-reuse guard: a pid
+    /// whose start-time changed is a different process entirely.
+    pid_start: Option<u64>,
     /// Usage meter fed from this session's PTY output.
     meter: crate::meter::Meter,
     /// True once the meter has been folded into the finalized counters —
@@ -346,14 +406,18 @@ impl AgentSession {
             commands,
             children: self.children.clone(),
             git: self.git.clone(),
-            tokens_in: self.meter.tokens_in,
-            tokens_out: self.meter.tokens_out,
-            tokens_total: self.meter.tokens_total,
-            tokens_cached: self.meter.tokens_cached,
-            cost_usd: self.meter.cost_usd,
-            cost_estimated: self.meter.estimated_cost(&self.agent).unwrap_or(0.0),
+            tokens_in: self.meter.tokens_in(),
+            tokens_out: self.meter.tokens_out(),
+            tokens_total: self.meter.tokens_total(),
+            tokens_cache_read: self.meter.tokens_cache_read(),
+            tokens_cache_write: self.meter.tokens_cache_write(),
+            usage_sources: self.meter.sources(),
+            cost_usd: self.meter.cost_usd(),
+            cost_estimated: self.meter.estimated_cost(),
             model: self.meter.model.clone(),
             context_left_pct: self.meter.context_left_pct,
+            cpu_pct: self.cpu_pct,
+            mem_bytes: self.mem_bytes,
         }
     }
 
@@ -373,11 +437,12 @@ impl AgentSession {
             exit_code: self.exit_code,
             touched: self.touched.values().cloned().collect(),
             commands: self.commands.iter().cloned().collect(),
-            tokens_in: self.meter.tokens_in,
-            tokens_out: self.meter.tokens_out,
-            tokens_total: self.meter.tokens_total,
-            tokens_cached: self.meter.tokens_cached,
-            cost_usd: self.meter.cost_usd,
+            tokens_in: self.meter.tokens_in(),
+            tokens_out: self.meter.tokens_out(),
+            tokens_total: self.meter.tokens_total(),
+            tokens_cache_read: self.meter.tokens_cache_read(),
+            tokens_cache_write: self.meter.tokens_cache_write(),
+            cost_usd: self.meter.cost_usd(),
             model: self.meter.model.clone(),
             metered_final: self.metered_final,
         }
@@ -417,8 +482,12 @@ pub struct PersistedSession {
     pub tokens_out: u64,
     #[serde(default)]
     pub tokens_total: u64,
+    /// Cache reads. `alias` migrates the pre-split `tokensCached` field
+    /// from archives written by older versions.
+    #[serde(default, alias = "tokensCached")]
+    pub tokens_cache_read: u64,
     #[serde(default)]
-    pub tokens_cached: u64,
+    pub tokens_cache_write: u64,
     #[serde(default)]
     pub cost_usd: f64,
     #[serde(default)]
@@ -464,11 +533,15 @@ impl From<PersistedSession> for AgentSession {
             children: Vec::new(),
             git: None,
             git_at: 0,
+            cpu_pct: None,
+            mem_bytes: None,
+            pid_start: None,
             meter: crate::meter::Meter::with_totals(
                 p.tokens_in,
                 p.tokens_out,
                 p.tokens_total,
-                p.tokens_cached,
+                p.tokens_cache_read,
+                p.tokens_cache_write,
                 p.cost_usd,
                 p.model,
             ),
@@ -511,7 +584,7 @@ impl Inner {
             by_agent
                 .entry(s.agent.clone())
                 .or_default()
-                .add(&s.agent, &s.meter);
+                .add(&s.meter);
         }
         by_agent.retain(|_, u| u.has_usage());
         let mut total = AgentUsage::default();
@@ -573,6 +646,9 @@ impl SessionRegistry {
             children: Vec::new(),
             git: None,
             git_at: 0,
+            cpu_pct: None,
+            mem_bytes: None,
+            pid_start: None,
             meter: crate::meter::Meter::default(),
             metered_final: false,
         };
@@ -600,7 +676,9 @@ impl SessionRegistry {
         if let Some(s) = g.sessions.values_mut().find(|s| s.pty_id == Some(pty_id)) {
             s.last_activity_at = now_ms();
             if !chunk.is_empty() {
-                s.meter.feed(&String::from_utf8_lossy(chunk));
+                // Raw bytes — the meter buffers incomplete UTF-8/ANSI
+                // across chunk boundaries itself.
+                s.meter.feed(chunk);
             }
             return true;
         }
@@ -616,7 +694,12 @@ impl SessionRegistry {
             s.ended_at = Some(now);
             s.exit_code = code;
             s.pid = None;
+            s.pid_start = None;
             s.children.clear();
+            s.cpu_pct = None;
+            s.mem_bytes = None;
+            // EOF: a final unterminated report line still counts.
+            s.meter.flush();
             for c in s.commands.iter_mut().filter(|c| c.running) {
                 c.running = false;
                 c.ended_at = Some(now);
@@ -644,7 +727,11 @@ impl SessionRegistry {
                 s.live = false;
                 s.ended_at = Some(now);
                 s.pid = None;
+                s.pid_start = None;
                 s.children.clear();
+                s.cpu_pct = None;
+                s.mem_bytes = None;
+                s.meter.flush();
                 for c in s.commands.iter_mut().filter(|c| c.running) {
                     c.running = false;
                     c.ended_at = Some(now);
@@ -673,7 +760,11 @@ impl SessionRegistry {
                     ptys.push(id);
                 }
                 s.pid = None;
+                s.pid_start = None;
                 s.children.clear();
+                s.cpu_pct = None;
+                s.mem_bytes = None;
+                s.meter.flush();
                 for c in s.commands.iter_mut().filter(|c| c.running) {
                     c.running = false;
                     c.ended_at = Some(now);
@@ -766,15 +857,48 @@ impl SessionRegistry {
         mutated
     }
 
-    /// Update the live children list + command lifecycle for one session.
-    /// `descendants` is every process under the session root pid.
+    /// Update the process picture for one session from a procmon sample.
+    /// Handles the children diff (command lifecycle), CPU/RAM, and the
+    /// PID-reuse guard: when the process at the session's pid has a
+    /// different start-time than recorded — or vanished — tracking stops
+    /// rather than attributing a stranger's tree to this session.
     /// Returns true when something changed.
-    pub fn note_children(&self, session_id: &str, descendants: Vec<ChildProc>, now: u64) -> bool {
+    pub fn note_proc(&self, session_id: &str, sample: ProcSample, now: u64) -> bool {
         let mut g = self.inner.lock().unwrap();
         let Some(s) = g.sessions.get_mut(session_id) else {
             return false;
         };
+        if !s.live {
+            return false;
+        }
+
+        // PID-reuse / death guard.
+        match (s.pid_start, sample.root_start) {
+            (None, Some(start)) => s.pid_start = Some(start),
+            (Some(_), None) | (Some(_), Some(_)) if s.pid_start != sample.root_start => {
+                // The process we spawned is gone from this pid (exited
+                // without a PTY exit yet, or the pid was recycled). Never
+                // attribute a recycled pid's tree to the session.
+                s.pid = None;
+                s.pid_start = None;
+                s.children.clear();
+                s.cpu_pct = None;
+                s.mem_bytes = None;
+                return true;
+            }
+            _ => {}
+        }
+
+        let descendants = sample.descendants;
         let mut changed = false;
+        if s.cpu_pct != sample.cpu_pct {
+            s.cpu_pct = sample.cpu_pct;
+            changed = true;
+        }
+        if s.mem_bytes != sample.mem_bytes {
+            s.mem_bytes = sample.mem_bytes;
+            changed = true;
+        }
 
         // Diff against previous children for command lifecycle.
         let prev: Vec<u32> = s.children.iter().map(|c| c.pid).collect();
@@ -914,14 +1038,15 @@ impl SessionRegistry {
         out
     }
 
-    /// Live session ids + pids for the process monitor.
-    pub fn live_roots(&self) -> Vec<(String, u32)> {
+    /// Live session (id, pid, workspace root) triples for the process
+    /// monitor — the root lets procmon sample hidden workspaces less often.
+    pub fn live_roots(&self) -> Vec<(String, u32, String)> {
         let g = self.inner.lock().unwrap();
         g.order
             .iter()
             .filter_map(|id| g.sessions.get(id))
             .filter(|s| s.live)
-            .filter_map(|s| s.pid.map(|pid| (s.id.clone(), pid)))
+            .filter_map(|s| s.pid.map(|pid| (s.id.clone(), pid, s.root.clone())))
             .collect()
     }
 
@@ -976,6 +1101,65 @@ impl SessionRegistry {
         Ok(v)
     }
 
+    /// Structured export of one session — compact JSON for the user's own
+    /// tooling (clipboard → notes/CI review). Deliberately excludes raw
+    /// terminal output and file contents; `program`/`args` are the user's
+    /// own launch command, kept because they reproduce the run.
+    /// `usage.sources` carries provenance — which report families the
+    /// numbers came from — so consumers can weigh them accordingly.
+    pub fn export(&self, id: &str) -> AppResult<serde_json::Value> {
+        let g = self.inner.lock().unwrap();
+        let s = g
+            .sessions
+            .get(id)
+            .ok_or_else(|| AppError::NotFound(format!("session {id}")))?;
+        let snap = s.snapshot(now_ms());
+        let mut files: Vec<FileTouch> = s.touched.values().cloned().collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let commands: Vec<CommandRun> = s.commands.iter().cloned().collect();
+        Ok(serde_json::json!({
+            "version": 1,
+            "app": "ai-cli-editor",
+            "exportedAt": now_ms(),
+            "session": {
+                "id": snap.id,
+                "label": snap.label,
+                "agent": snap.agent,
+                "agentSource": snap.agent_source,
+                "program": snap.program,
+                "args": s.args.clone(),
+                "root": snap.root,
+                "relPrefix": snap.rel_prefix,
+                "state": snap.state,
+                "live": snap.live,
+                "startedAt": snap.started_at,
+                "lastActivityAt": snap.last_activity_at,
+                "endedAt": snap.ended_at,
+                "exitCode": snap.exit_code,
+                "model": snap.model,
+                "contextLeftPct": snap.context_left_pct,
+            },
+            "git": snap.git,
+            "files": files,
+            "commands": commands,
+            "usage": {
+                "tokensIn": snap.tokens_in,
+                "tokensOut": snap.tokens_out,
+                "tokensTotal": snap.tokens_total,
+                "tokensCacheRead": snap.tokens_cache_read,
+                "tokensCacheWrite": snap.tokens_cache_write,
+                "costUsd": snap.cost_usd,
+                "costEstimated": snap.cost_estimated,
+                "sources": snap.usage_sources,
+            },
+            "review": {
+                // A session that touched files still needs a human look —
+                // this is the honest default, not a sign-off.
+                "requiresReview": !s.touched.is_empty(),
+            }
+        }))
+    }
+
     /// Replace the registry with persisted history (all marked stale).
     /// Live sessions are never resurrected from disk. Sessions archived
     /// before the finalized counters existed fold their meter in once —
@@ -999,7 +1183,7 @@ impl SessionRegistry {
                     g.usage_finalized
                         .entry(agent.clone())
                         .or_default()
-                        .add(&agent, &s.meter);
+                        .add(&s.meter);
                 }
             }
         }
@@ -1366,7 +1550,8 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             tokens_total: 0,
-            tokens_cached: 0,
+            tokens_cache_read: 0,
+            tokens_cache_write: 0,
             cost_usd: 0.0,
             model: None,
             metered_final: false,
@@ -1388,7 +1573,8 @@ mod tests {
                 tokens_in: 100,
                 tokens_out: 50,
                 tokens_total: 150,
-                tokens_cached: 0,
+                tokens_cache_read: 0,
+                tokens_cache_write: 0,
                 cost_usd: 1.0,
                 cost_estimated: 0.0,
             },
@@ -1412,7 +1598,8 @@ mod tests {
             tokens_in: 10,
             tokens_out: 5,
             tokens_total: 15,
-            tokens_cached: 0,
+            tokens_cache_read: 0,
+            tokens_cache_write: 0,
             cost_usd: 0.5,
             model: None,
             metered_final,
@@ -1447,5 +1634,115 @@ mod tests {
         let (reg, _) = reg_with(1, "");
         let ev = reg.snapshot("D:/other");
         assert!(ev.sessions.is_empty());
+    }
+
+    #[test]
+    fn legacy_tokens_cached_migrates_to_cache_read() {
+        // Archives written before the read/write split carry the combined
+        // `tokensCached` key — it must fold into cache_read, not vanish.
+        let raw = serde_json::json!({
+            "id": "s1", "label": "old", "agent": "claude",
+            "root": "C:/repo", "startedAt": 1, "tokensCached": 500,
+        });
+        let p: PersistedSession = serde_json::from_value(raw).unwrap();
+        assert_eq!(p.tokens_cache_read, 500);
+        assert_eq!(p.tokens_cache_write, 0);
+        let u: AgentUsage =
+            serde_json::from_value(serde_json::json!({"tokensCached": 42})).unwrap();
+        assert_eq!(u.tokens_cache_read, 42);
+        // And serializing never writes the legacy key back.
+        assert!(!serde_json::to_value(&u)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("tokensCached"));
+    }
+
+    fn sample(cpu: Option<f32>, mem: Option<u64>, start: Option<u64>) -> ProcSample {
+        ProcSample {
+            descendants: vec![ChildProc {
+                pid: 42,
+                name: "node.exe".into(),
+                cpu_pct: cpu.unwrap_or(0.0),
+                mem_bytes: mem.unwrap_or(0),
+            }],
+            cpu_pct: cpu,
+            mem_bytes: mem,
+            root_start: start,
+        }
+    }
+
+    #[test]
+    fn proc_sample_records_metrics() {
+        let (reg, ids) = reg_with(1, "");
+        assert!(reg.note_proc(&ids[0], sample(Some(12.5), Some(1_000_000), Some(777)), 1));
+        let ev = reg.snapshot("C:/repo");
+        assert_eq!(ev.sessions[0].cpu_pct, Some(12.5));
+        assert_eq!(ev.sessions[0].mem_bytes, Some(1_000_000));
+        assert_eq!(ev.sessions[0].children[0].name, "node.exe");
+        assert_eq!(ev.sessions[0].children[0].cpu_pct, 12.5);
+    }
+
+    #[test]
+    fn pid_reuse_drops_tracking() {
+        let (reg, ids) = reg_with(1, "");
+        // First sample records the pid's start-time.
+        reg.note_proc(&ids[0], sample(None, None, Some(100)), 1);
+        // A same-pid process with a DIFFERENT start time is not our
+        // process — tracking must stop, not follow the stranger's tree.
+        assert!(reg.note_proc(&ids[0], sample(Some(9.0), Some(9), Some(200)), 2));
+        let ev = reg.snapshot("C:/repo");
+        assert_eq!(ev.sessions[0].pid, None);
+        assert!(ev.sessions[0].children.is_empty());
+        assert_eq!(ev.sessions[0].cpu_pct, None);
+        assert_eq!(ev.sessions[0].mem_bytes, None);
+    }
+
+    #[test]
+    fn vanished_root_clears_metrics() {
+        let (reg, ids) = reg_with(1, "");
+        reg.note_proc(&ids[0], sample(Some(5.0), Some(64), Some(100)), 1);
+        // Root pid unreadable → metrics go unknown, children drop.
+        reg.note_proc(&ids[0], sample(None, None, None), 2);
+        let ev = reg.snapshot("C:/repo");
+        assert_eq!(ev.sessions[0].pid, None);
+        assert!(ev.sessions[0].children.is_empty());
+        assert_eq!(ev.sessions[0].cpu_pct, None);
+    }
+
+    #[test]
+    fn live_roots_expose_workspace_root() {
+        let (reg, ids) = reg_with(1, "");
+        let roots = reg.live_roots();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].0, ids[0]);
+        assert_eq!(roots[0].1, 1000);
+        assert_eq!(roots[0].2, "C:/repo");
+        reg.note_exit(100, Some(0));
+        assert!(reg.live_roots().is_empty());
+    }
+
+    #[test]
+    fn export_shape_and_review_flag() {
+        let (reg, ids) = reg_with(1, "");
+        reg.note_output(100, b"tokens used: 1,234\nmodel: gpt-5\n");
+        reg.note_fs_changes("C:/repo", &[change("src/a.rs")]);
+        let v = reg.export(&ids[0]).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["session"]["id"], ids[0].as_str());
+        assert_eq!(v["session"]["root"], "C:/repo");
+        assert_eq!(v["usage"]["tokensTotal"], 1234);
+        assert_eq!(v["usage"]["tokensCacheRead"], 0);
+        assert!(v["usage"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s == "tokens used"));
+        assert_eq!(v["review"]["requiresReview"], true);
+        assert_eq!(v["files"][0]["path"], "src/a.rs");
+        // No raw terminal output, no file contents.
+        let text = v.to_string();
+        assert!(!text.contains("terminal"));
+        assert!(reg.export("nope").is_err());
     }
 }
