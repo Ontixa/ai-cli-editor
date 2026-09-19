@@ -2,6 +2,7 @@ import { store } from "../state/app";
 import { useStore, shallow } from "../lib/store";
 import { dismissUpdate, installUpdate, setSidebarTab } from "../state/actions";
 import { usageTotals, fmtTokens, fmtCost } from "../lib/agents";
+import pkg from "../../package.json";
 
 function UpdateItem() {
   const update = useStore(store, (s) => s.update);
@@ -122,6 +123,9 @@ export function StatusBar() {
             {doc?.dirty && <span className="status-item accent">unsaved</span>}
           </>
         )}
+        <span className="status-item dim" title="app version">
+          v{pkg.version}
+        </span>
       </div>
     </footer>
   );
