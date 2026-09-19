@@ -1217,6 +1217,16 @@ kbd {
   color: var(--yellow);
   border-color: rgba(227, 179, 65, 0.5);
 }
+.sess-tag.tok.warn {
+  color: var(--yellow);
+  border-color: rgba(227, 179, 65, 0.5);
+  border-style: dashed;
+}
+.sess-tag.proc {
+  color: var(--cyan);
+  border-color: rgba(57, 197, 207, 0.35);
+  font-family: var(--font-mono);
+}
 .usage-total {
   font-size: 10.5px;
   color: var(--accent);
@@ -1844,6 +1854,32 @@ kbd {
 }
 .wt-head .sess-tag {
   font-size: 11.5px;
+}
+
+/* session presets */
+.tpl-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 11px;
+  border-bottom: 1px solid var(--border);
+}
+.tpl-chip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.tpl-chip .mini-btn {
+  padding: 2px 9px;
+  font-size: 10.5px;
+}
+.tpl-chip .icon-btn {
+  font-size: 10px;
+  padding: 1px 4px;
+  color: var(--fg-faint);
+}
+.tpl-chip .icon-btn:hover {
+  color: var(--red);
 }
 
 /* ============ review badges ============ */

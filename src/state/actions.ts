@@ -31,6 +31,7 @@ import type {
   FsBatch,
   FsChange,
   RestorePlan,
+  SessionTemplate,
   UsageReport,
   WorkspaceInfo,
 } from "../lib/types";
@@ -74,6 +75,7 @@ function persistNow() {
     theme: s.theme,
     recentFiles: s.recentFiles.slice(0, 20),
     recentProjects: s.recentProjects.slice(0, 12),
+    sessionTemplates: s.sessionTemplates.slice(0, 20),
   });
 }
 
@@ -122,8 +124,30 @@ function restoreGlobalPrefs(restored: Record<string, unknown>) {
     recentProjects: Array.isArray(restored.recentProjects)
       ? (restored.recentProjects as string[]).filter((x) => typeof x === "string")
       : [],
+    sessionTemplates: sanitizeTemplates(restored.sessionTemplates),
   });
   applyTheme(store.get().theme);
+}
+
+/** Defensive parse of persisted session templates — only well-formed
+ *  presets (nonempty program, string argv) survive. */
+function sanitizeTemplates(raw: unknown): SessionTemplate[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SessionTemplate[] = [];
+  for (const t of raw.slice(0, 20)) {
+    if (!t || typeof t !== "object") continue;
+    const r = t as Record<string, unknown>;
+    if (typeof r.program !== "string" || !r.program.trim()) continue;
+    out.push({
+      id: typeof r.id === "string" && r.id ? r.id : `tpl-${out.length}`,
+      label: (typeof r.label === "string" && r.label) || r.program,
+      program: r.program,
+      args: Array.isArray(r.args) ? r.args.filter((x): x is string => typeof x === "string") : [],
+      cwd: typeof r.cwd === "string" && r.cwd.trim() ? r.cwd : undefined,
+      testCmd: typeof r.testCmd === "string" && r.testCmd.trim() ? r.testCmd : undefined,
+    });
+  }
+  return out;
 }
 
 /** v2 layout: a project list + per-project tab state. */
@@ -416,7 +440,8 @@ export function reorderProjects(from: number, to: number) {
   schedulePersist();
 }
 
-/** Dirty-doc check, then close the project tab (terminals die with it). */
+/** Dirty-doc + live-session check, then close the project tab
+ *  (terminals die with it). */
 export function requestCloseProject(root: string) {
   const s = store.get();
   const proj = s.projects.find((p) => p.root === root);
@@ -427,32 +452,43 @@ export function requestCloseProject(root: string) {
         ([p, d]) => d.dirty && fields.tabs.some((t) => t.kind === "file" && t.path === p),
       )
     : [];
-  if (!dirty.length) {
+  const live = fields ? fields.sessions.filter((x) => x.live).length : 0;
+  if (!dirty.length && !live) {
     void closeProject(root);
     return;
   }
-  askConfirm({
-    title: `Close ${proj.name}`,
-    message: `${dirty.length} file${dirty.length === 1 ? "" : "s"} in this project have unsaved changes that will be lost.`,
-    buttons: [
-      { label: "Cancel" },
-      {
-        label: "Close Anyway",
-        kind: "danger",
-        onPick: () => void closeProject(root),
-      },
-      {
-        label: "Save All & Close",
-        kind: "primary",
-        onPick: () =>
-          void saveDocsThen(
-            root,
-            dirty.map(([p]) => p),
-            () => closeProject(root),
-          ),
-      },
-    ],
-  });
+  const parts: string[] = [];
+  if (dirty.length) {
+    parts.push(
+      `${dirty.length} file${dirty.length === 1 ? "" : "s"} in this project have unsaved changes that will be lost.`,
+    );
+  }
+  if (live) {
+    parts.push(
+      `${live} agent session${live === 1 ? " is" : "s are"} still running — closing terminates them.`,
+    );
+  }
+  const buttons: NonNullable<AppState["confirm"]>["buttons"] = [
+    { label: "Cancel" },
+    {
+      label: live ? "Stop & Close" : "Close Anyway",
+      kind: "danger",
+      onPick: () => void closeProject(root),
+    },
+  ];
+  if (dirty.length) {
+    buttons.push({
+      label: dirty.length === 1 ? "Save & Close" : "Save All & Close",
+      kind: "primary",
+      onPick: () =>
+        void saveDocsThen(
+          root,
+          dirty.map(([p]) => p),
+          () => closeProject(root),
+        ),
+    });
+  }
+  askConfirm({ title: `Close ${proj.name}`, message: parts.join(" "), buttons });
 }
 
 /** Save dirty docs of a project (activating it first if needed). */
@@ -540,11 +576,11 @@ export async function closeOtherProjects(root: string) {
 /** Close every project tab — ends at the welcome screen. */
 export async function closeAllProjects() {
   for (const p of [...store.get().projects]) {
-    // requestCloseProject would prompt per project; closing is explicit
-    // here so go through the dirty-check once for the whole batch.
-    if (dirtyPathsIn(p.root).length) {
+    // requestCloseProject prompts per project; closing is explicit here
+    // so route the first risky project through the confirm flow.
+    if (dirtyPathsIn(p.root).length || liveSessionsIn(p.root) > 0) {
       requestCloseProject(p.root);
-      return; // let the user resolve dirty projects one at a time
+      return; // let the user resolve risky projects one at a time
     }
     await closeProject(p.root);
   }
@@ -557,6 +593,13 @@ function dirtyPathsIn(root: string): string[] {
   return fields.tabs
     .filter((t) => t.kind === "file" && fields.docs[t.path]?.dirty)
     .map((t) => t.path);
+}
+
+function liveSessionsIn(root: string): number {
+  const s = store.get();
+  const fields = root === s.workspace?.root ? s : s.projectData[root];
+  if (!fields) return 0;
+  return fields.sessions.filter((x) => x.live).length;
 }
 
 // ---------- global confirm ----------
@@ -805,14 +848,54 @@ let gitRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 export function applyFsBatch(batch: FsBatch) {
   const s = store.get();
   if (batch.root === s.workspace?.root) {
+    if (batch.rescan) rescanActive();
     applyFsBatchActive(batch.changes);
     return;
   }
   const snap = s.projectData[batch.root];
   if (!snap) return;
+  const next = applyFsToSnapshot(snap, batch.changes);
   store.set({
-    projectData: { ...s.projectData, [batch.root]: applyFsToSnapshot(snap, batch.changes) },
+    projectData: {
+      ...s.projectData,
+      [batch.root]: batch.rescan ? rescanSnapshot(next) : next,
+    },
   });
+}
+
+/** The watcher overflowed and may have dropped events — derived state
+ *  for the active workspace can no longer be trusted. Invalidate every
+ *  expanded explorer dir, reconcile open docs against disk, and
+ *  refresh git status. */
+function rescanActive() {
+  const s = store.get();
+  const dirInvalidations = { ...s.dirInvalidations };
+  for (const dir of Object.keys(s.expanded)) {
+    dirInvalidations[dir] = (dirInvalidations[dir] ?? 0) + 1;
+  }
+  store.set({
+    dirInvalidations,
+    fileIndex: null,
+    activity: pushNotice(s.activity, "rescan", "watcher overflow — rescanning"),
+  });
+  void reconcileOpenDocs();
+  scheduleGitRefresh();
+}
+
+/** Rescan handling for a background project: bookkeeping only —
+ *  bump every expanded dir and drop the file index; open-doc content
+ *  is reconciled on activation. */
+function rescanSnapshot(snap: ProjectSnapshot): ProjectSnapshot {
+  const dirInvalidations = { ...snap.dirInvalidations };
+  for (const dir of Object.keys(snap.expanded)) {
+    dirInvalidations[dir] = (dirInvalidations[dir] ?? 0) + 1;
+  }
+  return {
+    ...snap,
+    dirInvalidations,
+    fileIndex: null,
+    activity: pushNotice(snap.activity, "rescan", "watcher overflow — rescanning"),
+  };
 }
 
 /** fs handling for a background project: bookkeeping only — doc content
@@ -1084,6 +1167,8 @@ export function newTerminal(launch?: {
   cwd?: string;
   /** Command typed into the shell right after spawn (confirmed installs). */
   initCmd?: string;
+  /** Test command offered on the session card — typed, never auto-run. */
+  testCmd?: string;
 }) {
   const s = store.get();
   if (!s.workspace) return;
@@ -1098,6 +1183,7 @@ export function newTerminal(launch?: {
     args: launch?.args,
     cwd: launch?.cwd,
     initCmd: launch?.initCmd,
+    testCmd: launch?.testCmd,
   };
   store.set({
     terminals: [...s.terminals, session],
@@ -1302,6 +1388,67 @@ export async function stopSession(id: string) {
   } catch {
     /* already exited */
   }
+}
+
+/** Structured session export → clipboard. No terminal output or file
+ *  contents are included — metadata, git summary, touched files,
+ *  commands, usage, provenance only. */
+export async function exportSession(id: string): Promise<string | null> {
+  try {
+    const data = await api.sessionExport(id);
+    await navigator.clipboard?.writeText(JSON.stringify(data, null, 2));
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+/** Type the terminal's configured test command into the session's PTY.
+ *  The command is visible and editable — it is sent as keystrokes with
+ *  a trailing Enter, never executed out-of-band. */
+export async function runSessionTest(id: string): Promise<void> {
+  const s = store.get();
+  const sess =
+    s.sessions.find((x) => x.id === id) ??
+    Object.values(s.projectData)
+      .flatMap((p) => p.sessions)
+      .find((x) => x.id === id);
+  if (!sess || sess.ptyId == null) return;
+  const term =
+    s.terminals.find((t) => t.ptyId === sess.ptyId) ??
+    Object.values(s.projectData)
+      .flatMap((p) => p.terminals)
+      .find((t) => t.ptyId === sess.ptyId);
+  const cmd = term?.testCmd?.trim();
+  if (!cmd) return;
+  focusSession(sess);
+  await api.ptyWrite(sess.ptyId, `${cmd}\r`).catch(() => {});
+}
+
+// ---------- session templates ----------
+
+/** Spawn a terminal from a saved template: structured program+argv,
+ *  optional workspace-relative cwd, optional test command. No shell
+ *  string interpolation. */
+export function launchTemplate(tpl: SessionTemplate) {
+  newTerminal({
+    program: tpl.program,
+    args: tpl.args,
+    label: tpl.label,
+    cwd: tpl.cwd,
+    testCmd: tpl.testCmd,
+  });
+}
+
+export function saveTemplate(tpl: SessionTemplate) {
+  const list = store.get().sessionTemplates.filter((t) => t.id !== tpl.id);
+  store.set({ sessionTemplates: [...list, tpl].slice(0, 20) });
+  schedulePersist();
+}
+
+export function deleteTemplate(id: string) {
+  store.set({ sessionTemplates: store.get().sessionTemplates.filter((t) => t.id !== id) });
+  schedulePersist();
 }
 
 // ---------- worktrees ----------

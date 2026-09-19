@@ -12,6 +12,11 @@ import {
   restoreCheckpoint,
   deleteCheckpoint,
   checkpointPlan,
+  exportSession,
+  runSessionTest,
+  launchTemplate,
+  saveTemplate,
+  deleteTemplate,
   markUserAction,
 } from "../../state/actions";
 import {
@@ -20,15 +25,26 @@ import {
   collisionSummary,
   sessionTokens,
   sessionCost,
+  sessionCache,
+  usageIsBare,
   fmtTokens,
   fmtCost,
   fmtPct,
+  fmtCpu,
+  fmtBytes,
+  splitArgs,
   usageTotals,
   usageAgents,
   usageTokens,
   usageCostLabel,
 } from "../../lib/agents";
-import type { AgentSession, CheckpointMeta, RestorePlan, WorktreeInfo } from "../../lib/types";
+import type {
+  AgentSession,
+  CheckpointMeta,
+  RestorePlan,
+  SessionTemplate,
+  WorktreeInfo,
+} from "../../lib/types";
 
 function stateClass(s: AgentSession): string {
   return `sess-dot ${s.state}`;
@@ -46,12 +62,16 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
   const lastCmd = [...s.commands].reverse().find((c) => !c.running);
   const tokens = sessionTokens(s);
   const cost = sessionCost(s);
+  const cache = sessionCache(s);
   const ctx = s.contextLeftPct;
+  const cpu = fmtCpu(s.cpuPct);
   const tokenTitle = [
     s.tokensIn ? `in ${s.tokensIn.toLocaleString()}` : "",
     s.tokensOut ? `out ${s.tokensOut.toLocaleString()}` : "",
     s.tokensTotal ? `total ${s.tokensTotal.toLocaleString()}` : "",
-    s.tokensCached ? `cached ${s.tokensCached.toLocaleString()}` : "",
+    cache.read ? `cache read ${cache.read.toLocaleString()}` : "",
+    cache.write ? `cache write ${cache.write.toLocaleString()}` : "",
+    s.usageSources?.length ? `source: ${s.usageSources.join(", ")}` : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -114,13 +134,30 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
           </span>
         )}
         {tokens > 0 && (
-          <span className="sess-tag tok" title={`tokens used — ${tokenTitle}`}>
+          <span
+            className={`sess-tag tok ${usageIsBare(s) ? "warn" : ""}`}
+            title={`tokens used — ${tokenTitle}${usageIsBare(s) ? " · low-confidence (bare count, no keyed report)" : ""}`}
+          >
             ⭑ {fmtTokens(tokens)}
+            {usageIsBare(s) ? "?" : ""}
           </span>
         )}
-        {s.tokensCached > 0 && (
-          <span className="sess-tag cache" title="prompt-cache read/creation tokens">
-            ⟲ {fmtTokens(s.tokensCached)}
+        {cache.read > 0 && (
+          <span className="sess-tag cache" title="prompt-cache READ tokens (billed cheaper)">
+            ⟲ {fmtTokens(cache.read)}
+          </span>
+        )}
+        {cache.write > 0 && (
+          <span className="sess-tag cache" title="prompt-cache WRITE/creation tokens">
+            ⟲+ {fmtTokens(cache.write)}
+          </span>
+        )}
+        {s.live && (cpu !== null || s.memBytes != null) && (
+          <span
+            className="sess-tag proc"
+            title={`process tree — ${cpu ?? "?"}% cpu${s.memBytes != null ? ` · ${fmtBytes(s.memBytes)}` : ""}`}
+          >
+            {cpu ?? "…"}%{s.memBytes != null ? ` ${fmtBytes(s.memBytes)}` : ""}
           </span>
         )}
         {cost && (
@@ -205,6 +242,13 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
             </button>
             <button
               className="mini-btn"
+              title="Type the session's configured test command into its terminal"
+              onClick={() => void runSessionTest(s.id)}
+            >
+              test
+            </button>
+            <button
+              className="mini-btn"
               title="Snapshot this session's working tree"
               onClick={() => void createCheckpoint(s.label, s.id)}
             >
@@ -222,6 +266,13 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
             </button>
           </>
         )}
+        <button
+          className="mini-btn"
+          title="Copy a compact JSON summary (files/commands/usage + provenance — no terminal output, no file contents)"
+          onClick={() => void exportSession(s.id)}
+        >
+          export
+        </button>
       </div>
     </div>
   );
@@ -355,6 +406,108 @@ function WorktreeRow({ w }: { w: WorktreeInfo }) {
   );
 }
 
+/** One saved session preset — click launches, ✕ deletes. */
+function TemplateChip({ t }: { t: SessionTemplate }) {
+  const spec = `${t.program}${t.args.length ? ` ${t.args.join(" ")}` : ""}`;
+  return (
+    <div className="tpl-chip">
+      <button
+        className="mini-btn"
+        title={`run: ${spec}${t.cwd ? ` · cwd ${t.cwd}` : ""}${t.testCmd ? ` · test: ${t.testCmd}` : ""}`}
+        onClick={() => {
+          markUserAction();
+          launchTemplate(t);
+        }}
+      >
+        ▶ {t.label}
+      </button>
+      <button className="icon-btn" title="delete preset" onClick={() => deleteTemplate(t.id)}>
+        ✕
+      </button>
+    </div>
+  );
+}
+
+/** Inline form for a new session preset: structured program + argv,
+ *  optional workspace-relative cwd, optional test command. */
+function NewTemplateForm({ onDone }: { onDone: () => void }) {
+  const [label, setLabel] = useState("");
+  const [program, setProgram] = useState("");
+  const [args, setArgs] = useState("");
+  const [cwd, setCwd] = useState("");
+  const [testCmd, setTestCmd] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = () => {
+    const prog = program.trim();
+    if (!prog) {
+      setError("program is required (e.g. codex, claude, npm)");
+      return;
+    }
+    saveTemplate({
+      id: `tpl-${Date.now().toString(36)}`,
+      label: label.trim() || prog,
+      program: prog,
+      args: splitArgs(args),
+      cwd: cwd.trim() || undefined,
+      testCmd: testCmd.trim() || undefined,
+    });
+    onDone();
+  };
+
+  return (
+    <div className="wt-form">
+      <input
+        className="text-input"
+        placeholder="label (e.g. codex · lint)"
+        value={label}
+        autoFocus
+        onChange={(e) => setLabel(e.target.value)}
+      />
+      <input
+        className="text-input"
+        placeholder="program (e.g. codex, claude, npm)"
+        value={program}
+        onChange={(e) => {
+          setProgram(e.target.value);
+          setError(null);
+        }}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      <input
+        className="text-input"
+        placeholder='args — quoted spans kept together (e.g. --name "my run")'
+        value={args}
+        onChange={(e) => setArgs(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      <input
+        className="text-input"
+        placeholder="cwd (workspace-relative, optional)"
+        value={cwd}
+        onChange={(e) => setCwd(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      <input
+        className="text-input"
+        placeholder="test command (typed by the card's test button)"
+        value={testCmd}
+        onChange={(e) => setTestCmd(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      {error && <div className="banner err">{error}</div>}
+      <div className="sess-actions">
+        <button className="mini-btn primary" disabled={!program.trim()} onClick={submit}>
+          save preset
+        </button>
+        <button className="mini-btn" onClick={onDone}>
+          cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CheckpointRow({ c }: { c: CheckpointMeta }) {
   const [plan, setPlan] = useState<RestorePlan | null>(null);
   const [open, setOpen] = useState(false);
@@ -428,8 +581,10 @@ export function Agents() {
   const worktrees = useStore(store, (s) => s.worktrees, shallow);
   const checkpoints = useStore(store, (s) => s.checkpoints, shallow);
   const usage = useStore(store, (s) => s.usage);
+  const templates = useStore(store, (s) => s.sessionTemplates, shallow);
   const isRepo = useStore(store, (s) => s.git.isRepo);
   const [creating, setCreating] = useState(false);
+  const [templating, setTemplating] = useState(false);
   const [showStale, setShowStale] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
@@ -450,7 +605,12 @@ export function Agents() {
     `all-time usage across ${usage.total.sessions} metered session(s)` +
     ` — in ${usage.total.tokensIn.toLocaleString()}` +
     ` · out ${usage.total.tokensOut.toLocaleString()}` +
-    (usage.total.tokensCached > 0 ? ` · cached ${usage.total.tokensCached.toLocaleString()}` : "") +
+    (usage.total.tokensCacheRead > 0
+      ? ` · cache read ${usage.total.tokensCacheRead.toLocaleString()}`
+      : "") +
+    (usage.total.tokensCacheWrite > 0
+      ? ` · cache write ${usage.total.tokensCacheWrite.toLocaleString()}`
+      : "") +
     (usage.total.tokensTotal > 0 ? ` · total ${usage.total.tokensTotal.toLocaleString()}` : "") +
     (usage.total.costUsd > 0 ? ` — $${usage.total.costUsd.toFixed(2)} reported` : "") +
     (usage.total.costEstimated > 0 ? ` + ≈$${usage.total.costEstimated.toFixed(2)} estimated` : "");
@@ -508,14 +668,20 @@ export function Agents() {
               `${u.sessions} session(s)` +
               ` · in ${u.tokensIn.toLocaleString()}` +
               ` · out ${u.tokensOut.toLocaleString()}` +
-              (u.tokensCached > 0 ? ` · cached ${u.tokensCached.toLocaleString()}` : "") +
+              (u.tokensCacheRead > 0 ? ` · cache read ${u.tokensCacheRead.toLocaleString()}` : "") +
+              (u.tokensCacheWrite > 0
+                ? ` · cache write ${u.tokensCacheWrite.toLocaleString()}`
+                : "") +
               (u.tokensTotal > 0 ? ` · total ${u.tokensTotal.toLocaleString()}` : "");
             return (
               <div className="usage-row" key={id} title={title}>
                 <span className="usage-agent">{agentName(id)}</span>
-                {u.tokensCached > 0 && (
-                  <span className="dim" title="cached tokens">
-                    ⟲ {fmtTokens(u.tokensCached)}
+                {u.tokensCacheRead + u.tokensCacheWrite > 0 && (
+                  <span
+                    className="dim"
+                    title={`cache read ${u.tokensCacheRead.toLocaleString()} · write ${u.tokensCacheWrite.toLocaleString()}`}
+                  >
+                    ⟲ {fmtTokens(u.tokensCacheRead + u.tokensCacheWrite)}
                   </span>
                 )}
                 <span className="spacer" />
@@ -542,6 +708,13 @@ export function Agents() {
           </span>
         )}
         <span className="spacer" />
+        <button
+          className="mini-btn"
+          title="session presets — structured program+argv launchers"
+          onClick={() => setTemplating((x) => !x)}
+        >
+          + preset
+        </button>
         {isRepo && (
           <button className="mini-btn primary" onClick={() => setCreating((x) => !x)}>
             + isolated agent
@@ -549,6 +722,14 @@ export function Agents() {
         )}
       </div>
       {creating && <NewWorktreeForm onDone={() => setCreating(false)} />}
+      {templating && <NewTemplateForm onDone={() => setTemplating(false)} />}
+      {templates.length > 0 && (
+        <div className="tpl-row">
+          {templates.map((t) => (
+            <TemplateChip key={t.id} t={t} />
+          ))}
+        </div>
+      )}
 
       {live.length === 0 && !creating && (
         <div className="empty-hint pad">no live sessions — spawn an agent from the terminal</div>

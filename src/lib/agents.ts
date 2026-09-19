@@ -62,11 +62,39 @@ export function sessionTokens(s: AgentSession): number {
 
 /** Cost for a session — `{ estimated: false }` means the CLI itself
  *  reported the figure; `true` means it came from the price table and
- *  must be displayed with `≈`. */
+ *  must be displayed with `≈`. `null` = unknown (never shows a guess). */
 export function sessionCost(s: AgentSession): { usd: number; estimated: boolean } | null {
   if (s.costUsd > 0) return { usd: s.costUsd, estimated: false };
-  if (s.costEstimated > 0) return { usd: s.costEstimated, estimated: true };
+  if (s.costEstimated && s.costEstimated > 0) return { usd: s.costEstimated, estimated: true };
   return null;
+}
+
+/** Prompt-cache tokens a session reported, split by direction. */
+export function sessionCache(s: AgentSession): { read: number; write: number } {
+  return { read: s.tokensCacheRead, write: s.tokensCacheWrite };
+}
+
+/** True when usage came only from the low-confidence "N tokens" fallback —
+ *  worth flagging in the UI rather than presenting as a billing figure. */
+export function usageIsBare(s: AgentSession): boolean {
+  const src = s.usageSources ?? [];
+  return (
+    src.length > 0 && src.every((x) => x === "bare tokens" || x === "model" || x === "context left")
+  );
+}
+
+/** Compact memory label: `345MB`, `1.2GB`. */
+export function fmtBytes(n: number): string {
+  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)}GB`;
+  if (n >= 1 << 20) return `${Math.round(n / (1 << 20))}MB`;
+  if (n >= 1 << 10) return `${Math.round(n / (1 << 10))}KB`;
+  return `${n}B`;
+}
+
+/** Compact CPU% label; `null`/undefined → null (unknown ≠ 0). */
+export function fmtCpu(pct: number | null | undefined): string | null {
+  if (pct === null || pct === undefined) return null;
+  return `${Math.round(pct)}%`;
 }
 
 /** `12` → "12", `12_345` → "12.3k", `1_450_000` → "1.45M". */
@@ -74,6 +102,18 @@ export function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 1 : 2)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1)}k`;
   return `${n}`;
+}
+
+/** Split a template args string into argv — whitespace-separated, with
+ *  double-quoted spans kept together (`--name "my app"` →
+ *  `["--name","my app"]`). Used for session templates so argv stays
+ *  structured rather than a shell string. */
+export function splitArgs(input: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(input))) out.push(m[1] ?? m[2]);
+  return out;
 }
 
 /** USD cost: 4 decimals under a cent, 2 above. `est` prefixes `≈`. */
@@ -94,7 +134,7 @@ export function usageTotals(sessions: AgentSession[]): {
   for (const s of sessions) {
     tokens += sessionTokens(s);
     costUsd += s.costUsd;
-    costEstimated += s.costUsd > 0 ? 0 : s.costEstimated;
+    costEstimated += s.costUsd > 0 ? 0 : (s.costEstimated ?? 0);
   }
   return { tokens, costUsd, costEstimated };
 }

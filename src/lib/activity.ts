@@ -5,7 +5,8 @@
 
 import type { FsChange } from "./types";
 
-export type ActivityKind = "created" | "modified" | "deleted" | "renamed" | "terminal" | "exit";
+export type ActivityKind =
+  "created" | "modified" | "deleted" | "renamed" | "terminal" | "exit" | "rescan";
 
 export interface ActivityItem {
   id: number;
@@ -56,7 +57,7 @@ export function ingestChanges(
 
 export function pushNotice(
   items: ActivityItem[],
-  kind: "terminal" | "exit",
+  kind: "terminal" | "exit" | "rescan",
   detail: string,
   now: number = Date.now(),
 ): ActivityItem[] {

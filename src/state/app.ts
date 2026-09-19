@@ -8,6 +8,7 @@ import type {
   GitStatus,
   ReviewedFile,
   SearchMatch,
+  SessionTemplate,
   UpdateState,
   UsageReport,
   WorktreeInfo,
@@ -57,6 +58,9 @@ export interface TerminalSession {
   cwd?: string;
   /** Command typed into the shell right after spawn (confirmed installs). */
   initCmd?: string;
+  /** User-chosen test command from the session template — typed into the
+   *  session's terminal by the "test" button, never auto-run. */
+  testCmd?: string;
 }
 
 export interface SearchUiState {
@@ -177,6 +181,9 @@ export interface AppState {
    *  backend-side in sessions.json + live meters on top). Global —
    *  not scoped to the active project. */
   usage: UsageReport;
+  /** User-defined session presets (structured argv, optional cwd and
+   *  test command) — global, persisted in workspace-state. */
+  sessionTemplates: SessionTemplate[];
   /** Git worktrees under `.worktrees/` for agent isolation. */
   worktrees: WorktreeInfo[];
   /** Checkpoints stored in the repo's git dir. */
@@ -214,7 +221,8 @@ const EMPTY_USAGE: UsageReport = {
     tokensIn: 0,
     tokensOut: 0,
     tokensTotal: 0,
-    tokensCached: 0,
+    tokensCacheRead: 0,
+    tokensCacheWrite: 0,
     costUsd: 0,
     costEstimated: 0,
   },
@@ -253,6 +261,7 @@ export const initialState: AppState = {
   sessions: [],
   collisions: [],
   usage: EMPTY_USAGE,
+  sessionTemplates: [],
   worktrees: [],
   checkpoints: [],
   review: {},

@@ -17,6 +17,7 @@ import type {
   ReviewedFile,
   SearchChunk,
   SearchDone,
+  SessionExport,
   SessionsEvent,
   ShellSpec,
   WorktreeInfo,
@@ -86,6 +87,7 @@ export const api = {
   sessionRename: (id: string, label: string) => invoke<void>("session_rename", { id, label }),
   sessionStop: (id: string) => invoke<void>("session_stop", { id }),
   sessionFiles: (id: string) => invoke<FileTouch[]>("session_files", { id }),
+  sessionExport: (id: string) => invoke<SessionExport>("session_export", { id }),
   worktreeList: () => invoke<WorktreeInfo[]>("worktree_list"),
   worktreeCreate: (name: string, branch?: string, base?: string) =>
     invoke<WorktreeInfo>("worktree_create", {

@@ -34,10 +34,13 @@ export interface FsChange {
 }
 
 /** fs:batch payload — tagged with the emitting workspace's root so the
- *  frontend can route changes to the right project tab. */
+ *  frontend can route changes to the right project tab. `rescan` means
+ *  the watcher lost events (queue overflow) — rebuild derived state
+ *  (dirs, index, git, open docs) instead of trusting `changes`. */
 export interface FsBatch {
   root: string;
   changes: FsChange[];
+  rescan?: boolean;
 }
 
 /** git:stale payload. */
@@ -99,6 +102,10 @@ export interface CommandRun {
 export interface ChildProc {
   pid: number;
   name: string;
+  /** CPU% of this process (can exceed 100 on multicore). */
+  cpuPct: number;
+  /** Resident memory in bytes. */
+  memBytes: number;
 }
 
 export interface SessionGit {
@@ -132,17 +139,28 @@ export interface AgentSession {
   tokensIn: number;
   tokensOut: number;
   tokensTotal: number;
-  /** Prompt-cache read/creation tokens the CLI reported. */
-  tokensCached: number;
+  /** Prompt-cache read tokens (cheaper billing class). */
+  tokensCacheRead: number;
+  /** Prompt-cache write/creation tokens. */
+  tokensCacheWrite: number;
+  /** Report families that produced the usage numbers — provenance so the
+   *  UI can tell a keyed billing report from the bare-tokens fallback. */
+  usageSources: string[];
   /** USD cost the CLI itself printed — the exact figure. */
   costUsd: number;
-  /** Estimate from the static price table when no cost was reported —
-   *  show as `≈$x`, never as an exact bill. */
-  costEstimated: number;
+  /** Estimate from the static price table when no cost was reported AND
+   *  the CLI announced a priced model — show as `≈$x`, never as a bill.
+   *  `null`/`undefined` = unknown (no self-assigned price). */
+  costEstimated?: number | null;
   /** Model identifier the CLI announced on its output, when known. */
   model?: string | null;
   /** Latest "% context left" the CLI reported, when it reports one. */
   contextLeftPct?: number | null;
+  /** CPU% of the session's process tree when measurable (may exceed 100).
+   *  `null`/`undefined` = not measurable right now, not zero. */
+  cpuPct?: number | null;
+  /** Resident bytes of the session's process tree when measurable. */
+  memBytes?: number | null;
 }
 
 /** All-time usage for one agent kind (or the grand total): the finalized
@@ -154,7 +172,10 @@ export interface AgentUsage {
   tokensIn: number;
   tokensOut: number;
   tokensTotal: number;
-  tokensCached: number;
+  /** Prompt-cache read tokens (legacy `tokensCached` archives fold here). */
+  tokensCacheRead: number;
+  /** Prompt-cache write/creation tokens. */
+  tokensCacheWrite: number;
   /** Reported (exact) USD. */
   costUsd: number;
   /** Estimated USD for sessions whose CLI reports tokens but no cost. */
@@ -182,6 +203,63 @@ export interface SessionsEvent {
   collisions: Collision[];
   /** All-time usage — global, same payload on every event. */
   usage: UsageReport;
+}
+
+/** Compact per-session export (session_export command) — metadata only:
+ *  no raw terminal output, no file contents. `usage.sources` records
+ *  which report families produced the numbers. */
+export interface SessionExport {
+  version: number;
+  app: string;
+  exportedAt: number;
+  session: {
+    id: string;
+    label: string;
+    agent: string;
+    agentSource: string;
+    program?: string | null;
+    args: string[];
+    root: string;
+    relPrefix: string;
+    state: string;
+    live: boolean;
+    startedAt: number;
+    lastActivityAt: number;
+    endedAt?: number | null;
+    exitCode?: number | null;
+    model?: string | null;
+    contextLeftPct?: number | null;
+  };
+  git?: SessionGit | null;
+  files: FileTouch[];
+  commands: CommandRun[];
+  usage: {
+    tokensIn: number;
+    tokensOut: number;
+    tokensTotal: number;
+    tokensCacheRead: number;
+    tokensCacheWrite: number;
+    costUsd: number;
+    costEstimated?: number | null;
+    sources: string[];
+  };
+  review: { requiresReview: boolean };
+}
+
+/** A user-defined session preset — structured argv, never a shell string
+ *  interpolated from repo/branch names. Persisted in workspace-state. */
+export interface SessionTemplate {
+  id: string;
+  /** Display name shown in the launcher row. */
+  label: string;
+  /** Executable or agent id (spawned as a structured argv command). */
+  program: string;
+  args: string[];
+  /** Optional workspace-relative working dir (e.g. a worktree). */
+  cwd?: string;
+  /** User-chosen test command — typed into the session's terminal on
+   *  demand, never auto-run. */
+  testCmd?: string;
 }
 
 // ---------- worktrees ----------

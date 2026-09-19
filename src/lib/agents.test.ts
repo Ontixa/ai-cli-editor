@@ -6,9 +6,14 @@ import {
   REVIEW_LABEL,
   sessionTokens,
   sessionCost,
+  sessionCache,
+  usageIsBare,
   fmtTokens,
   fmtCost,
   fmtPct,
+  fmtBytes,
+  fmtCpu,
+  splitArgs,
   usageTotals,
   usageAgents,
   usageTokens,
@@ -36,7 +41,9 @@ function sess(over: Partial<AgentSession>): AgentSession {
     tokensIn: 0,
     tokensOut: 0,
     tokensTotal: 0,
-    tokensCached: 0,
+    tokensCacheRead: 0,
+    tokensCacheWrite: 0,
+    usageSources: [],
     costUsd: 0,
     costEstimated: 0,
     ...over,
@@ -49,7 +56,8 @@ function usage(over: Partial<AgentUsage>): AgentUsage {
     tokensIn: 0,
     tokensOut: 0,
     tokensTotal: 0,
-    tokensCached: 0,
+    tokensCacheRead: 0,
+    tokensCacheWrite: 0,
     costUsd: 0,
     costEstimated: 0,
     ...over,
@@ -129,6 +137,43 @@ describe("usage helpers", () => {
       estimated: true,
     });
     expect(sessionCost(sess({}))).toBeNull();
+  });
+
+  it("sessionCache splits read from write", () => {
+    expect(sessionCache(sess({ tokensCacheRead: 700, tokensCacheWrite: 90 }))).toEqual({
+      read: 700,
+      write: 90,
+    });
+    expect(sessionCache(sess({}))).toEqual({ read: 0, write: 0 });
+  });
+
+  it("usageIsBare flags bare-tokens-only sessions, not keyed reports", () => {
+    expect(usageIsBare(sess({ usageSources: ["bare tokens"] }))).toBe(true);
+    expect(usageIsBare(sess({ usageSources: ["bare tokens", "model"] }))).toBe(true);
+    expect(usageIsBare(sess({ usageSources: ["tokens used"] }))).toBe(false);
+    expect(usageIsBare(sess({ usageSources: ["tokens used", "bare tokens"] }))).toBe(false);
+    expect(usageIsBare(sess({}))).toBe(false);
+  });
+
+  it("fmtBytes compacts KB/MB/GB", () => {
+    expect(fmtBytes(512)).toBe("512B");
+    expect(fmtBytes(2048)).toBe("2KB");
+    expect(fmtBytes(345 * 1024 * 1024)).toBe("345MB");
+    expect(fmtBytes(1.5 * 1024 * 1024 * 1024)).toBe("1.5GB");
+  });
+
+  it("fmtCpu keeps null unknown distinct from 0", () => {
+    expect(fmtCpu(null)).toBeNull();
+    expect(fmtCpu(undefined)).toBeNull();
+    expect(fmtCpu(0)).toBe("0%");
+    expect(fmtCpu(12.4)).toBe("12%");
+  });
+
+  it("splitArgs keeps quoted spans together", () => {
+    expect(splitArgs("")).toEqual([]);
+    expect(splitArgs("  --flag  -v ")).toEqual(["--flag", "-v"]);
+    expect(splitArgs('--name "my app" -x')).toEqual(["--name", "my app", "-x"]);
+    expect(splitArgs('"C:\\Program Files\\cli" run')).toEqual(["C:\\Program Files\\cli", "run"]);
   });
 
   it("fmtTokens abbreviates k and M", () => {
