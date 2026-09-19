@@ -111,8 +111,23 @@ tree, a real diff — and stays fast and stable through long agent sessions.
 
 ## Installation
 
-Binaries are not published yet — build from source (below). Windows 11 is the
-primary target; macOS and Linux work through the same codebase.
+Grab the latest signed installer (`-setup.exe`, NSIS) from
+[GitHub Releases](https://github.com/tang-vu/ai-cli-editor/releases), or build
+from source (below). Windows 11 is the primary target; macOS and Linux work
+through the same codebase.
+
+### Updates
+
+The app checks GitHub Releases once on startup for a newer signed build. When
+one exists, an `⬆ update` item appears in the status bar — click to download,
+verify the signature, install, and relaunch. This update check is the app's
+only network call; everything else stays fully local. Unsigned or tampered
+artifacts are rejected by minisign signature verification.
+
+Maintainers cut a release by pushing a version tag (`git tag v0.3.0 && git
+push --tags`) — `.github/workflows/release.yml` builds, signs
+(`TAURI_SIGNING_PRIVATE_KEY` secret), and publishes the installers plus the
+`latest.json` the updater reads.
 
 ## Development
 
@@ -191,9 +206,10 @@ Events are typed contracts (`fs:batch`, `pty:out:<id>`, `search:chunk`,
 ## Privacy
 
 Local-first by construction: no accounts, no telemetry, no cloud calls, no
-source code leaves the machine. The webview has no `fs`/`shell`/`http`
-plugin access; all filesystem commands are constrained to the opened
-workspace root.
+source code leaves the machine. The single exception is the signed-update
+check against this repo's GitHub Releases (see Updates). The webview has no
+`fs`/`shell`/`http` plugin access; all filesystem commands are constrained
+to the opened workspace root.
 
 ## Roadmap
 

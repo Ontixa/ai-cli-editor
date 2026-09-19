@@ -13,8 +13,39 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
-Outputs land in `src-tauri/target/release/bundle/` (`.msi` on Windows,
-`.dmg`/`.app` on macOS, `.deb`/`.AppImage` on Linux).
+Outputs land in `src-tauri/target/release/bundle/` (`.msi` + NSIS
+`-setup.exe` on Windows, `.dmg`/`.app` on macOS, `.deb`/`.AppImage` on Linux).
+
+### Signing local builds
+
+`tauri.conf.json` configures the updater plugin with a minisign pubkey. To
+produce signed updater artifacts locally:
+
+```bash
+TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.tauri/ai-cli-editor.key" \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+npm run tauri:build
+```
+
+`.sig` files appear next to the installers. The private key lives outside the
+repo — never commit it.
+
+## Publishing a release (GitHub Actions)
+
+1. Ensure `tauri.conf.json` `version` equals the intended release version.
+2. `git tag v0.3.0 && git push --tags`.
+3. `.github/workflows/release.yml` verifies tag == version, builds on
+   `windows-latest`, signs with `TAURI_SIGNING_PRIVATE_KEY`, and publishes a
+   GitHub Release containing the installers, `.sig` files, and `latest.json`.
+
+Required repo secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY` — contents of `~/.tauri/ai-cli-editor.key`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — key password (empty string if none)
+
+The in-app updater reads
+`…/releases/latest/download/latest.json`, verifies the minisign signature,
+then installs via the NSIS installer in passive mode.
 
 ## Platform notes
 

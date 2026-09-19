@@ -214,3 +214,22 @@ export interface SearchDone {
   id: number;
   truncated: boolean;
 }
+
+// ---------- updater (frontend-only state) ----------
+
+export interface UpdateInfo {
+  version: string;
+  date?: string;
+  notes?: string;
+}
+
+export type UpdateStatus = "available" | "downloading" | "installed" | "error";
+
+export interface UpdateState extends UpdateInfo {
+  status: UpdateStatus;
+  /** bytes downloaded so far / total when known */
+  progress?: number;
+  total?: number;
+  error?: string;
+  dismissed?: boolean;
+}

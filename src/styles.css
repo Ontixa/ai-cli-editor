@@ -932,6 +932,12 @@ kbd {
 .status-item.dim {
   color: var(--fg-faint);
 }
+.status-item.clickable {
+  cursor: pointer;
+}
+.status-item.update {
+  font-weight: 600;
+}
 
 /* ============ overlays (quick open / palette) ============ */
 .overlay {

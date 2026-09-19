@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default window capabilities: core events plus the open-folder dialog. No shell, fs, or http plugins are exposed to the webview.",
+  "description": "Default window capabilities: core events, the open-folder dialog, and the updater (check/download signed updates). No shell, fs, or http plugins are exposed to the webview.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": ["core:default", "dialog:default", "updater:default", "process:default"]
 }

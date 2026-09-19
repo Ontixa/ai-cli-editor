@@ -660,6 +660,8 @@ fn save_state(app: AppHandle, state_json: serde_json::Value) -> AppResult<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .setup(|app| {
             // Resolve the app-data dir once; restore session history so a

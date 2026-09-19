@@ -1,5 +1,49 @@
 import { store } from "../state/app";
 import { useStore } from "../lib/store";
+import { dismissUpdate, installUpdate } from "../state/actions";
+
+function UpdateItem() {
+  const update = useStore(store, (s) => s.update);
+  if (!update || update.dismissed) return null;
+
+  const pct =
+    update.status === "downloading" && update.total
+      ? ` ${Math.round((100 * (update.progress ?? 0)) / update.total)}%`
+      : "";
+  const text =
+    update.status === "available"
+      ? `⬆ update v${update.version}`
+      : update.status === "downloading"
+        ? `updating…${pct}`
+        : update.status === "installed"
+          ? "restarting…"
+          : "update failed — retry";
+
+  const clickable = update.status === "available" || update.status === "error";
+  const title =
+    update.status === "error"
+      ? (update.error ?? "update failed")
+      : update.notes
+        ? `v${update.version}\n${update.notes}`
+        : `Install v${update.version}`;
+
+  return (
+    <>
+      <span
+        className={`status-item update ${clickable ? "clickable accent" : "dim"}`}
+        title={title}
+        onClick={clickable ? () => void installUpdate() : undefined}
+      >
+        {text}
+      </span>
+      {update.status === "available" && (
+        <span className="status-item dim clickable" title="dismiss update" onClick={dismissUpdate}>
+          ×
+        </span>
+      )}
+    </>
+  );
+}
 
 export function StatusBar() {
   const git = useStore(store, (s) => s.git);
@@ -29,6 +73,7 @@ export function StatusBar() {
         )}
         {follow && <span className="status-item accent">follow</span>}
         {searchRunning && <span className="status-item dim">searching… {searchCount}</span>}
+        <UpdateItem />
       </div>
       <div className="statusbar-right">
         {tab?.kind === "file" && (

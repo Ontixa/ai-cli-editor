@@ -20,6 +20,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
   exit codes via `GetExitCodeProcess` on Windows.
 - **File attribution + collision detection**: watcher events attribute to
   sessions (direct/likely/ambiguous); same-file and shared-tree warnings.
+- **Signed auto-updates**: `tauri-plugin-updater` checks GitHub Releases on
+  startup — the app's only network call — and installs verified builds from
+  a status-bar prompt; `release.yml` publishes signed installers +
+  `latest.json` on `v*` tags.
 - **Git worktrees**: `worktree_list/create/remove/prune`; `.worktrees/`
   convention, `agent/<name>` branches, dirty protection, forced removal only
   on explicit confirm, auto-excluded via `.git/info/exclude`.

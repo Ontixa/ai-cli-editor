@@ -17,6 +17,7 @@ import {
 } from "../lib/ipc";
 import { editorManager } from "../lib/editor-manager";
 import { ingestChanges, pushNotice } from "../lib/activity";
+import { checkForUpdate, downloadAndInstall, relaunchApp } from "../lib/update";
 import { isSourcePath } from "../lib/lang";
 import type { AgentSession, FsChange, RestorePlan } from "../lib/types";
 
@@ -100,6 +101,46 @@ export async function boot() {
       store.set({ workspaceError: `Could not reopen ${ws.root}` });
     }
   }
+
+  // Sole intentional network call: check GitHub Releases for a signed update.
+  void checkForUpdates();
+}
+
+// ---------- app updates ----------
+
+/** Query the update endpoint once; silent on any failure (offline, no releases). */
+export async function checkForUpdates(): Promise<void> {
+  try {
+    const info = await checkForUpdate();
+    if (!info) return;
+    store.set({ update: { ...info, status: "available" } });
+  } catch {
+    // offline / no published release — ignore
+  }
+}
+
+export async function installUpdate(): Promise<void> {
+  const cur = store.get().update;
+  if (!cur || cur.status === "downloading") return;
+  store.set({ update: { ...cur, status: "downloading", progress: 0, error: undefined } });
+  try {
+    await downloadAndInstall((downloaded, total) => {
+      const u = store.get().update;
+      if (u) store.set({ update: { ...u, progress: downloaded, total } });
+    });
+    const u = store.get().update;
+    if (u) store.set({ update: { ...u, status: "installed" } });
+    // Windows: the NSIS installer relaunches the app; relaunch() covers the rest.
+    await relaunchApp();
+  } catch (e) {
+    const u = store.get().update;
+    if (u) store.set({ update: { ...u, status: "error", error: String(e) } });
+  }
+}
+
+export function dismissUpdate(): void {
+  const u = store.get().update;
+  if (u) store.set({ update: { ...u, dismissed: true } });
 }
 
 // ---------- workspace ----------

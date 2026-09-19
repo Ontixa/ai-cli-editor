@@ -6,7 +6,7 @@ authors = ["AI CLI Editor contributors"]
 license = "Apache-2.0"
 repository = "https://github.com/ai-cli-editor/ai-cli-editor"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.77.2"
 
 # Desktop-first crate: "rlib" is what the app binary links; "staticlib"
 # keeps the iOS/mobile option open. "cdylib" is intentionally omitted — it
@@ -32,6 +32,8 @@ ignore = "0.4"
 base64 = "0.22"
 similar = "2"
 sysinfo = "0.33"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

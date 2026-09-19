@@ -8,6 +8,7 @@ import type {
   GitStatus,
   ReviewedFile,
   SearchMatch,
+  UpdateState,
   WorktreeInfo,
   WorkspaceInfo,
 } from "../lib/types";
@@ -130,6 +131,9 @@ export interface AppState {
   /** Timestamp of last intentional user action; Follow Agent won't steal
    *  focus within a few seconds of it. */
   lastUserAction: number;
+
+  /** App-update check result (GitHub Releases); null = not checked/none. */
+  update: UpdateState | null;
 }
 
 const EMPTY_GIT: GitStatus = { isRepo: false, branch: null, changes: [] };
@@ -174,6 +178,8 @@ export const initialState: AppState = {
   search: { id: 0, query: "", matches: [], running: false, truncated: false },
   recentFiles: [],
   lastUserAction: 0,
+
+  update: null,
 };
 
 export const store = new Store<AppState>(initialState);
