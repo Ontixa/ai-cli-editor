@@ -699,9 +699,8 @@ impl SessionRegistry {
         let now = now_ms();
         let root_norm = crate::paths::normalize(ws_root);
         let root_prefix = format!("{root_norm}/");
-        let in_workspace = |s: &AgentSession| -> bool {
-            s.root == root_norm || s.root.starts_with(&root_prefix)
-        };
+        let in_workspace =
+            |s: &AgentSession| -> bool { s.root == root_norm || s.root.starts_with(&root_prefix) };
         let mut mutated = false;
 
         for change in changes {

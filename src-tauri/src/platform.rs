@@ -324,7 +324,12 @@ mod tests {
             assert_eq!(agent_kind(id), *id, "agent_kind({id})");
         }
         assert_eq!(agent_kind("claude.cmd"), "claude");
+        // Basename extraction follows the host OS separator — cover a
+        // native absolute path on each family.
+        #[cfg(windows)]
         assert_eq!(agent_kind("C:\\tools\\Copilot.EXE"), "copilot");
+        #[cfg(not(windows))]
+        assert_eq!(agent_kind("/usr/local/bin/Copilot"), "copilot");
         assert_eq!(agent_kind("bash"), "shell");
         assert_eq!(agent_kind("vitest"), "terminal");
     }
