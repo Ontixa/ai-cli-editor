@@ -85,7 +85,9 @@ fn int_at(bytes: &[u8], i: usize) -> Option<(u64, usize)> {
         match bytes[j] {
             b'0'..=b'9' => {
                 seen = true;
-                v = v.saturating_mul(10).saturating_add((bytes[j] - b'0') as u64);
+                v = v
+                    .saturating_mul(10)
+                    .saturating_add((bytes[j] - b'0') as u64);
             }
             b',' | b'_' if seen => {}
             _ => break,
@@ -396,7 +398,9 @@ impl Meter {
         }
         let (pin, pout) = price_per_million(agent)?;
         Some(
-            (self.tokens_in as f64 * pin + self.tokens_out as f64 * pout + self.tokens_total as f64 * pin)
+            (self.tokens_in as f64 * pin
+                + self.tokens_out as f64 * pout
+                + self.tokens_total as f64 * pin)
                 / 1_000_000.0,
         )
     }
@@ -431,9 +435,9 @@ mod tests {
     #[test]
     fn aider_line_counts_delta_and_session_cost() {
         let mut m = Meter::default();
-        assert!(m.feed(
-            "Tokens: 12,345 sent, 6,789 received. Cost: $0.05 message, $0.42 session.\n"
-        ));
+        assert!(
+            m.feed("Tokens: 12,345 sent, 6,789 received. Cost: $0.05 message, $0.42 session.\n")
+        );
         assert_eq!(m.tokens_in, 12_345);
         assert_eq!(m.tokens_out, 6_789);
         assert!((m.cost_usd - 0.42).abs() < 1e-9);
@@ -463,7 +467,9 @@ mod tests {
     #[test]
     fn gemini_stats_rows() {
         let mut m = Meter::default();
-        m.feed("  Input Tokens                    12,345\n  Output Tokens                    1,234\n");
+        m.feed(
+            "  Input Tokens                    12,345\n  Output Tokens                    1,234\n",
+        );
         assert_eq!(m.tokens_in, 12_345);
         assert_eq!(m.tokens_out, 1_234);
         assert_eq!(m.total(), 13_579);

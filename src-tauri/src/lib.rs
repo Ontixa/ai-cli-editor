@@ -417,7 +417,10 @@ fn git_diff(
 fn git_stage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> AppResult<()> {
     let root = state.root()?;
     git::stage(&root, &paths)?;
-    let _ = app.emit("git:stale", serde_json::json!({ "root": root.to_string_lossy() }));
+    let _ = app.emit(
+        "git:stale",
+        serde_json::json!({ "root": root.to_string_lossy() }),
+    );
     Ok(())
 }
 
@@ -425,7 +428,10 @@ fn git_stage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> AppR
 fn git_unstage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> AppResult<()> {
     let root = state.root()?;
     git::unstage(&root, &paths)?;
-    let _ = app.emit("git:stale", serde_json::json!({ "root": root.to_string_lossy() }));
+    let _ = app.emit(
+        "git:stale",
+        serde_json::json!({ "root": root.to_string_lossy() }),
+    );
     Ok(())
 }
 
@@ -433,7 +439,10 @@ fn git_unstage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> Ap
 fn git_commit(app: AppHandle, state: State<AppState>, message: String) -> AppResult<()> {
     let root = state.root()?;
     git::commit(&root, &message)?;
-    let _ = app.emit("git:stale", serde_json::json!({ "root": root.to_string_lossy() }));
+    let _ = app.emit(
+        "git:stale",
+        serde_json::json!({ "root": root.to_string_lossy() }),
+    );
     Ok(())
 }
 
@@ -559,11 +568,7 @@ fn pty_spawn(
                 // the text for token/cost lines the CLI printed.
                 let bytes = payload
                     .as_str()
-                    .and_then(|b64| {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(b64)
-                            .ok()
-                    })
+                    .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
                     .unwrap_or_default();
                 sessions.note_output(id, &bytes);
                 emit_sessions(&emit_app, &emit_root, false);
