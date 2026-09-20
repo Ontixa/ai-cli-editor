@@ -324,6 +324,7 @@ mod tests {
             assert_eq!(agent_kind(id), *id, "agent_kind({id})");
         }
         assert_eq!(agent_kind("claude.cmd"), "claude");
+        #[cfg(windows)]
         assert_eq!(agent_kind("C:\\tools\\Copilot.EXE"), "copilot");
         assert_eq!(agent_kind("bash"), "shell");
         assert_eq!(agent_kind("vitest"), "terminal");
