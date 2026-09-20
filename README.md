@@ -122,7 +122,7 @@ tree, a real diff — and stays fast and stable through long agent sessions.
 ## Installation
 
 Grab the latest signed installer (`-setup.exe`, NSIS) from
-[GitHub Releases](https://github.com/tang-vu/ai-cli-editor/releases), or build
+[GitHub Releases](https://github.com/Ontixa/ai-cli-editor/releases), or build
 from source (below). Windows 11 is the primary target; macOS and Linux work
 through the same codebase.
 

@@ -30,7 +30,7 @@
     "updater": {
       "active": true,
       "endpoints": [
-        "https://github.com/tang-vu/ai-cli-editor/releases/latest/download/latest.json"
+        "https://github.com/Ontixa/ai-cli-editor/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2MDMxNkM1N0U3NzY4MjQKUldRa2FIZCt4UllEbGlQakl4dXJYTE1RMms3RlZCVlBlVENTSC9kckcxVTBZY3Jmc1dIVUU2RUcK",
       "windows": {
