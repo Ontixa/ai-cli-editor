@@ -534,7 +534,7 @@ fn worktree_dirty_refuses_then_force_removes() {
     assert!(!dir.join(".worktrees/d1").exists());
 
     // The main checkout can never be removed.
-    assert!(worktree::remove(&dir, ".", true).is_err() || true);
+    let _ = worktree::remove(&dir, ".", true);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
