@@ -2,7 +2,9 @@
 //! Exercises the pieces the first milestone depends on: PTY lifecycle,
 //! filesystem watching, git status/diff, workspace search, and fs ops.
 
-use ai_cli_editor_lib::{checkpoint, fs_ops, git, platform, pty, search, watcher, worktree};
+use ai_cli_editor_lib::{
+    checkpoint, error::AppError, fs_ops, git, platform, pty, search, watcher, worktree,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver};
@@ -191,6 +193,17 @@ fn git_in(dir: &Path, args: &[&str]) {
         .expect("git run")
         .status;
     assert!(st.success(), "git {args:?} failed");
+}
+
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("git run");
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 #[test]
@@ -533,8 +546,33 @@ fn worktree_dirty_refuses_then_force_removes() {
     worktree::remove(&dir, ".worktrees/d1", true).expect("force remove");
     assert!(!dir.join(".worktrees/d1").exists());
 
-    // The main checkout can never be removed.
-    let _ = worktree::remove(&dir, ".", true);
+    // The main checkout can never be removed, even with force — the
+    // request must be rejected before git runs, and nothing may change.
+    let head = git_out(&dir, &["rev-parse", "HEAD"]);
+    std::fs::write(dir.join("sentinel.txt"), b"keep me\n").unwrap();
+
+    for force in [false, true] {
+        let err =
+            worktree::remove(&dir, ".", force).expect_err("removing the main worktree must fail");
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "expected InvalidInput rejection, got {err:?}"
+        );
+        assert!(err.to_string().contains("main worktree"));
+    }
+
+    // Main checkout, git metadata, sentinel content and HEAD are untouched,
+    // and the main worktree is still registered as such.
+    assert!(dir.join(".git").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("sentinel.txt")).unwrap(),
+        "keep me\n"
+    );
+    assert_eq!(git_out(&dir, &["rev-parse", "HEAD"]), head);
+    let trees = worktree::list(&dir).expect("list after refusal");
+    assert_eq!(trees.len(), 1);
+    assert!(trees[0].main);
+    assert_eq!(trees[0].path, ".");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
