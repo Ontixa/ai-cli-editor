@@ -182,6 +182,10 @@ whole install runs visibly. Unknown programs get generic session
 tracking — absence of all of them is fine, a plain shell is always
 available.
 
+For a provider-free runtime example, see
+[Agent Loop Runtime through the editor terminal](docs/runtime-terminal-interoperability.md).
+This uses terminal output and retained files, not an embedded mission UI.
+
 ## Architecture
 
 ```
