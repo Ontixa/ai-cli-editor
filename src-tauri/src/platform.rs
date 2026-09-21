@@ -6,6 +6,9 @@ use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+mod batch;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellSpec {
@@ -250,16 +253,36 @@ pub fn default_shell() -> ShellSpec {
 }
 
 /// Wrap a program so it can be spawned by CreateProcess/ConPTY on Windows:
-/// `.cmd`/`.bat` shims (npm installs agents this way) need `cmd /c`, and
-/// `.ps1` needs powershell. On other platforms the command passes through.
-pub fn wrap_for_spawn(program: &str, args: &[String]) -> (String, Vec<String>) {
+/// Exact supported npm shims use native Node argv. Other batch files accept
+/// only restricted literal input; `.ps1` retains its existing interpreter.
+/// On other platforms the command passes through.
+pub fn wrap_for_spawn(
+    program: &str,
+    args: &[String],
+) -> crate::error::AppResult<(String, Vec<String>)> {
+    #[cfg(windows)]
+    {
+        // Resolve bare names before inspecting a shim's bytes. Explicit relative
+        // paths remain relative to the requested child cwd, not this process.
+        let initial_lower = program.to_ascii_lowercase();
+        if !initial_lower.ends_with(".exe")
+            && !initial_lower.ends_with(".ps1")
+            && !program.contains(['\\', '/'])
+        {
+            if let Some(path) = find_on_path(program) {
+                let resolved = path.to_string_lossy();
+                if resolved != program {
+                    return wrap_for_spawn(&resolved, args);
+                }
+            }
+        }
+        let lower = program.to_ascii_lowercase();
+        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            return batch::prepare(program, args);
+        }
+    }
     if cfg!(windows) {
         let lower = program.to_lowercase();
-        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
-            let mut a = vec!["/c".to_string(), program.to_string()];
-            a.extend(args.iter().cloned());
-            return ("cmd.exe".to_string(), a);
-        }
         if lower.ends_with(".ps1") {
             let mut a = vec![
                 "-NoProfile".to_string(),
@@ -269,19 +292,10 @@ pub fn wrap_for_spawn(program: &str, args: &[String]) -> (String, Vec<String>) {
                 program.to_string(),
             ];
             a.extend(args.iter().cloned());
-            return ("powershell.exe".to_string(), a);
-        }
-        // Bare name resolving to a shim (e.g. "codex" → codex.cmd on PATH).
-        if !lower.ends_with(".exe") && !program.contains(['\\', '/']) {
-            if let Some(p) = find_on_path(program) {
-                let s = p.to_string_lossy().to_string();
-                if s != program {
-                    return wrap_for_spawn(&s, args);
-                }
-            }
+            return Ok(("powershell.exe".to_string(), a));
         }
     }
-    (program.to_string(), args.to_vec())
+    Ok((program.to_string(), args.to_vec()))
 }
 
 /// Probe which known coding agents are installed.
@@ -443,21 +457,11 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn explicit_wrappers_keep_program_paths_and_argument_vectors() {
+    fn explicit_powershell_wrapper_keeps_argument_vectors() {
         let args = vec!["argument with spaces".into()];
-        for extension in ["cmd", "bat"] {
-            let program = format!("C:\\node tools\\codex.{extension}");
-            assert_eq!(
-                wrap_for_spawn(&program, &args),
-                (
-                    "cmd.exe".into(),
-                    vec!["/c".into(), program, args[0].clone()]
-                )
-            );
-        }
         let program = "C:\\node tools\\codex.ps1";
         assert_eq!(
-            wrap_for_spawn(program, &args),
+            wrap_for_spawn(program, &args).unwrap(),
             (
                 "powershell.exe".into(),
                 vec![

@@ -8,6 +8,11 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Windows command transport now bypasses `cmd.exe` only for the exact supported
+  npm Node shim template, preserving literal arguments through native Node.
+  Other `.cmd`/`.bat` launches use a restricted literal domain and reject
+  unsupported paths or arguments before spawning. See the
+  [Windows transport contract](docs/windows-command-transport.md).
 - Windows agent detection now selects launchable executable or interpreter
   shims instead of npm's extensionless Unix shell scripts. Supported
   `PATHEXT` ordering and PATH-directory precedence are preserved, and
