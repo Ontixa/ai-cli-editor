@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 use std::env;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,39 +140,50 @@ pub fn process_exit_code(pid: u32) -> Option<i64> {
 }
 
 /// Candidate executable file names for `name` on this platform.
-/// On Windows, PATHEXT drives the extensions tried.
+/// On Windows, PATHEXT orders supported executable and wrapper extensions.
+/// Extensionless npm shell shims are not executable by CreateProcess.
 pub fn candidate_names(name: &str) -> Vec<String> {
     if cfg!(windows) {
         let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-        let mut out = Vec::new();
-        let lower = name.to_lowercase();
-        // Exact name first (e.g. already has .exe).
-        out.push(name.to_string());
-        for ext in pathext.split(';').filter(|e| !e.is_empty()) {
-            let e = ext.to_lowercase();
-            if !lower.ends_with(&e) {
-                out.push(format!("{name}{e}"));
-            }
-        }
-        // shims commonly installed by npm on Windows
-        for ext in [".cmd", ".ps1", ".bat"] {
-            let cand = format!("{name}{ext}");
-            if !out.iter().any(|o| o.eq_ignore_ascii_case(&cand)) {
-                out.push(cand);
-            }
-        }
-        out
+        windows_candidate_names(name, &pathext)
     } else {
         vec![name.to_string()]
     }
 }
 
+fn windows_candidate_names(name: &str, pathext: &str) -> Vec<String> {
+    // Match what wrap_for_spawn can launch. PATHEXT can also contain
+    // associations such as .js/.vbs, for which we provide no interpreter.
+    const SUPPORTED: &[&str] = &[".com", ".exe", ".bat", ".cmd", ".ps1"];
+    let lower = name.to_ascii_lowercase();
+    if SUPPORTED.iter().any(|ext| lower.ends_with(ext)) {
+        return vec![name.to_string()];
+    }
+    let mut out = Vec::new();
+    for ext in pathext.split(';').chain([".cmd", ".ps1", ".bat"]) {
+        let ext = ext.trim().to_ascii_lowercase();
+        if !SUPPORTED.contains(&ext.as_str()) {
+            continue;
+        }
+        let candidate = format!("{name}{ext}");
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
 /// Find an executable on PATH. Pure filesystem probing, no process spawn.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
-        for cand in candidate_names(name) {
-            let p = dir.join(&cand);
+    find_in_path(&path_var, &candidate_names(name))
+}
+
+/// Keep PATH-directory precedence, independently of candidate precedence.
+fn find_in_path(path_var: &OsStr, candidates: &[String]) -> Option<PathBuf> {
+    for dir in env::split_paths(path_var) {
+        for cand in candidates {
+            let p = dir.join(cand);
             if p.is_file() {
                 return Some(p);
             }
@@ -309,6 +321,155 @@ mod tests {
         let c = candidate_names("codex");
         assert!(c.iter().any(|n| n.eq_ignore_ascii_case("codex.exe")));
         assert!(c.iter().any(|n| n.eq_ignore_ascii_case("codex.cmd")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_candidates_do_not_launch_extensionless_npm_shims() {
+        assert!(!candidate_names("codex").iter().any(|name| name == "codex"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn explicitly_named_windows_launchers_are_not_reinterpreted() {
+        for name in [
+            "codex.exe",
+            "codex.cmd",
+            "codex.bat",
+            "codex.ps1",
+            "tool.COM",
+        ] {
+            assert_eq!(candidate_names(name), vec![name.to_string()]);
+        }
+    }
+
+    struct PathFixture(PathBuf);
+
+    impl PathFixture {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = env::temp_dir().join(format!(
+                "aice path fixture {} {nonce} {}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+
+        fn dir(&self, name: &str) -> PathBuf {
+            let dir = self.0.join(name);
+            std::fs::create_dir(&dir).unwrap();
+            dir
+        }
+    }
+
+    impl Drop for PathFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn npm_sibling_shims_resolve_to_windows_wrapper_in_spaced_directory() {
+        let fixture = PathFixture::new();
+        let dir = fixture.dir("node tools");
+        std::fs::write(dir.join("codex"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("codex.cmd"), b"@echo off\r\n").unwrap();
+        std::fs::write(dir.join("codex.ps1"), b"# PowerShell\n").unwrap();
+        let path = env::join_paths([&dir]).unwrap();
+        let candidates = windows_candidate_names("codex", ".COM;.EXE;.BAT;.CMD");
+        assert_eq!(
+            find_in_path(&path, &candidates),
+            Some(dir.join("codex.cmd"))
+        );
+    }
+
+    #[test]
+    fn extensionless_only_shim_is_unavailable_on_windows() {
+        let fixture = PathFixture::new();
+        std::fs::write(fixture.0.join("codex"), b"#!/bin/sh\n").unwrap();
+        let path = env::join_paths([&fixture.0]).unwrap();
+        let candidates = windows_candidate_names("codex", ".COM;.EXE;.BAT;.CMD");
+        assert_eq!(find_in_path(&path, &candidates), None);
+        // Unix probing still accepts the extensionless launcher.
+        assert_eq!(
+            find_in_path(&path, &["codex".into()]),
+            Some(fixture.0.join("codex"))
+        );
+    }
+
+    #[test]
+    fn path_directory_order_takes_precedence_over_extension_order() {
+        let fixture = PathFixture::new();
+        let first = fixture.dir("first path");
+        let second = fixture.dir("second path");
+        std::fs::write(first.join("codex.cmd"), b"@echo off\r\n").unwrap();
+        std::fs::write(second.join("codex.exe"), b"fixture").unwrap();
+        let path = env::join_paths([&first, &second]).unwrap();
+        let candidates = windows_candidate_names("codex", ".EXE;.CMD");
+        assert_eq!(
+            find_in_path(&path, &candidates),
+            Some(first.join("codex.cmd"))
+        );
+        std::fs::write(first.join("codex.exe"), b"fixture").unwrap();
+        assert_eq!(
+            find_in_path(&path, &candidates),
+            Some(first.join("codex.exe"))
+        );
+    }
+
+    #[test]
+    fn supported_pathext_order_is_preserved_without_duplicates_or_associations() {
+        assert_eq!(
+            windows_candidate_names("codex", ".VBS; .PS1 ;.CMD;.EXE;.cmd;.JS;"),
+            vec!["codex.ps1", "codex.cmd", "codex.exe", "codex.bat"]
+        );
+        for name in [
+            "codex.exe",
+            "codex.cmd",
+            "codex.bat",
+            "codex.ps1",
+            "tool.COM",
+        ] {
+            assert_eq!(windows_candidate_names(name, ""), vec![name.to_string()]);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn explicit_wrappers_keep_program_paths_and_argument_vectors() {
+        let args = vec!["argument with spaces".into()];
+        for extension in ["cmd", "bat"] {
+            let program = format!("C:\\node tools\\codex.{extension}");
+            assert_eq!(
+                wrap_for_spawn(&program, &args),
+                (
+                    "cmd.exe".into(),
+                    vec!["/c".into(), program, args[0].clone()]
+                )
+            );
+        }
+        let program = "C:\\node tools\\codex.ps1";
+        assert_eq!(
+            wrap_for_spawn(program, &args),
+            (
+                "powershell.exe".into(),
+                vec![
+                    "-NoProfile".into(),
+                    "-ExecutionPolicy".into(),
+                    "Bypass".into(),
+                    "-File".into(),
+                    program.into(),
+                    args[0].clone()
+                ]
+            )
+        );
     }
 
     #[test]

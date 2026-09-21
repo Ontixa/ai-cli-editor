@@ -4,6 +4,17 @@ All notable changes to this project will be documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Windows agent detection now selects launchable executable or interpreter
+  shims instead of npm's extensionless Unix shell scripts. Supported
+  `PATHEXT` ordering and PATH-directory precedence are preserved, and
+  explicitly named `.exe`, `.com`, `.cmd`, `.bat`, and `.ps1` launchers are
+  resolved exactly. Extensionless-only installs are not advertised as
+  available on Windows; Unix lookup is unchanged.
+
 ## [0.2.0] — Agent Workspace
 
 ### Added
