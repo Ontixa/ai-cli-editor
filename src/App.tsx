@@ -18,6 +18,7 @@ import { StatusBar } from "./components/StatusBar";
 import { QuickOpen } from "./components/overlays/QuickOpen";
 import { CommandPalette } from "./components/overlays/CommandPalette";
 import { ConfirmModal } from "./components/overlays/ConfirmModal";
+import { ExcludesDialog } from "./components/overlays/ExcludesDialog";
 import { Splitter } from "./components/Splitter";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
@@ -84,6 +85,7 @@ export default function App() {
       <QuickOpen />
       <CommandPalette />
       <ConfirmModal />
+      <ExcludesDialog />
     </div>
   );
 }

@@ -86,7 +86,10 @@ tree, a real diff — and stays fast and stable through long agent sessions.
   persist across restarts in `sessions.json`.
 - **Live file watching** — creations, edits, deletes and renames land in the
   tree, the Changes panel, Agent Activity, and session attribution the
-  moment they happen.
+  moment they happen. Built-in noise excludes (`node_modules`, `target`,
+  `dist`, …) are extended with your own gitignore-style patterns via the
+  palette → "Configure Ignored Paths…"; the rules also drive Quick Open's
+  index and the built-in search fallback, and apply live without restart.
 - **Agent Activity** — a session timeline of what the agent touched:
   `23:31:02  M  src/auth.ts`, grouped when edits repeat.
 - **Follow Agent** — optionally surfaces the file the agent is currently
@@ -232,8 +235,8 @@ to the opened workspace root.
 ## Roadmap
 
 v0.2 "Agent Workspace" delivers sessions, the cockpit, worktrees, collision
-detection, review classification, and checkpoints. Near-term: configurable
-ignore lists, bundled ripgrep, session templates, merge-readiness summaries.
+detection, review classification, and checkpoints. Near-term: bundled
+ripgrep, session templates, merge-readiness summaries.
 Explicit non-goals live in `docs/project-roadmap.md` — LSP, extensions,
 embedded AI chat, and AI APIs are out of scope by design.
 

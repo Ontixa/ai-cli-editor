@@ -19,6 +19,7 @@ import type {
   SearchDone,
   SessionsEvent,
   ShellSpec,
+  WatchExcludesInfo,
   WorktreeInfo,
   WorkspaceInfo,
 } from "./types";
@@ -62,6 +63,10 @@ export const api = {
   searchStart: (query: string, caseSensitive: boolean, regex: boolean) =>
     invoke<number>("search_start", { query, caseSensitive, regex }),
   searchCancel: () => invoke<void>("search_cancel"),
+  getWatchExcludes: () => invoke<WatchExcludesInfo>("get_watch_excludes"),
+  /** Replace the user's watch-exclude patterns; returns the normalized
+   *  list the backend applied (throws on invalid patterns). */
+  setWatchExcludes: (patterns: string[]) => invoke<string[]>("set_watch_excludes", { patterns }),
   ptySpawn: (args: {
     kind?: string;
     program?: string;

@@ -3,7 +3,7 @@
 //! filesystem watching, git status/diff, workspace search, and fs ops.
 
 use ai_cli_editor_lib::{
-    checkpoint, error::AppError, fs_ops, git, platform, pty, search, watcher, worktree,
+    checkpoint, error::AppError, excludes, fs_ops, git, platform, pty, search, watcher, worktree,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -146,7 +146,8 @@ fn watcher_reports_created_and_modified() {
         let _ = tx.send(batch);
     });
 
-    let _w = watcher::start(dir.clone(), emit, None).expect("watcher");
+    let _w = watcher::start(dir.clone(), emit, None, Arc::new(excludes::IgnoreRules::new()))
+        .expect("watcher");
     // Let the watcher settle before producing events.
     std::thread::sleep(Duration::from_millis(300));
 
@@ -178,6 +179,62 @@ fn watcher_reports_created_and_modified() {
         10,
     );
     assert!(found_modify, "watcher did not report modification");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn watcher_honors_user_excludes() {
+    let dir = fresh_dir("watchx");
+    std::fs::create_dir_all(dir.join("scratch")).unwrap();
+    let (tx, rx) = channel::<Vec<watcher::FsChange>>();
+    let emit = Arc::new(move |batch: Vec<watcher::FsChange>| {
+        let _ = tx.send(batch);
+    });
+
+    let rules = Arc::new(excludes::IgnoreRules::new());
+    rules
+        .set_user_patterns(vec!["scratch".to_string()])
+        .expect("valid pattern");
+    let _w = watcher::start(dir.clone(), emit, None, rules.clone()).expect("watcher");
+    std::thread::sleep(Duration::from_millis(300));
+
+    std::fs::write(dir.join("scratch/ignored.txt"), b"x").unwrap();
+    std::fs::write(dir.join("seen.txt"), b"x").unwrap();
+
+    // Collect for a bounded window: `seen.txt` must arrive, nothing under
+    // `scratch/` may ever surface.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = false;
+    while Instant::now() < deadline && !seen {
+        match rx.recv_timeout(Duration::from_millis(300)) {
+            Ok(batch) => {
+                assert!(
+                    batch.iter().all(|c| !c.path.starts_with("scratch")),
+                    "excluded path leaked into batch: {batch:?}"
+                );
+                if batch.iter().any(|c| c.path == "seen.txt") {
+                    seen = true;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(seen, "watcher never reported seen.txt");
+
+    // Rules swap is live: dropping the pattern un-excludes without restart.
+    rules.set_user_patterns(vec![]).expect("clear patterns");
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(dir.join("scratch/now-seen.txt"), b"x").unwrap();
+    let found = wait_for(
+        &rx,
+        &mut |batch: &Vec<watcher::FsChange>| {
+            batch.iter().any(|c| c.path == "scratch/now-seen.txt")
+        },
+        10,
+    );
+    assert!(found, "watcher did not pick up the live exclude update");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -289,6 +346,7 @@ fn search_streams_matches() {
             case_sensitive: true,
             regex: false,
         },
+        Arc::new(excludes::IgnoreRules::new()),
         emit,
     )
     .expect("search start");

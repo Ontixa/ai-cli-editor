@@ -262,6 +262,13 @@ export interface FileList {
   truncated: boolean;
 }
 
+/** get_watch_excludes payload — the compiled-in defaults plus the user's
+ *  normalized patterns (gitignore syntax; `!` entries are whitelists). */
+export interface WatchExcludesInfo {
+  defaults: string[];
+  user: string[];
+}
+
 export interface SearchChunk {
   id: number;
   matches: SearchMatch[];
