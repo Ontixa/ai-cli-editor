@@ -259,6 +259,7 @@ function takeSnapshot(s: AppState): ProjectSnapshot {
     worktrees: s.worktrees,
     checkpoints: s.checkpoints,
     review: s.review,
+    mergeReadiness: s.mergeReadiness,
     fileIndex: s.fileIndex,
     fileIndexTruncated: s.fileIndexTruncated,
     search: s.search.running ? { ...s.search, running: false } : s.search,
@@ -286,6 +287,7 @@ function freshProjectFields(info: WorkspaceInfo): ProjectSnapshot {
     worktrees: [],
     checkpoints: [],
     review: {},
+    mergeReadiness: [],
     fileIndex: null,
     fileIndexTruncated: false,
     search: { id: 0, query: "", matches: [], running: false, truncated: false },
@@ -298,6 +300,7 @@ function freshProjectFields(info: WorkspaceInfo): ProjectSnapshot {
 function refreshAfterActivate() {
   void refreshGit();
   void refreshWorktrees();
+  void refreshMergeReadiness();
   void refreshCheckpoints();
   void api
     .sessionList()
@@ -528,6 +531,7 @@ export async function closeProject(root: string) {
       worktrees: [],
       checkpoints: [],
       review: {},
+      mergeReadiness: [],
       fileIndex: null,
       fileIndexTruncated: false,
       search: { id: 0, query: "", matches: [], running: false, truncated: false },
@@ -1061,6 +1065,8 @@ export async function commitStaged(message: string): Promise<string | null> {
   try {
     await api.gitCommit(message);
     void refreshGit();
+    // A commit on the base branch moves every worktree's behind count.
+    void refreshMergeReadiness();
     return null;
   } catch (e) {
     return String(e);
@@ -1349,8 +1355,26 @@ export async function refreshWorktrees() {
   try {
     const worktrees = await api.worktreeList();
     store.set({ worktrees });
+    // Worktree set changed → readiness entries keyed by path may be stale.
+    void refreshMergeReadiness();
   } catch {
     store.set({ worktrees: [] });
+  }
+}
+
+/** Read-only merge probe per worktree. Deliberately NOT hooked to
+ *  git:stale — each run spawns a few git processes per worktree, so it
+ *  refreshes on activation, worktree/commit mutations, and the cockpit's
+ *  manual refresh button. */
+export async function refreshMergeReadiness() {
+  if (!store.get().workspace) return;
+  try {
+    const mergeReadiness = await api.mergeReadiness();
+    if (!store.get().workspace) return;
+    store.set({ mergeReadiness });
+  } catch {
+    // Not a repo / git missing → nothing to show.
+    store.set({ mergeReadiness: [] });
   }
 }
 
@@ -1433,6 +1457,8 @@ export async function restoreCheckpoint(id: string, force: boolean): Promise<str
     const res = await api.checkpointRestore(id, force);
     await refreshCheckpoints();
     void refreshGit();
+    // A restore may have rewritten files inside a worktree.
+    void refreshMergeReadiness();
     return res.warnings.length ? res.warnings.join("; ") : null;
   } catch (e) {
     return String(e);

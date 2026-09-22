@@ -8,6 +8,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Merge-readiness summary**: each agent worktree row in the Agents
+  cockpit now reports commits ahead/behind the base branch, uncommitted
+  and untracked file counts, a read-only clean-merge verdict from
+  `git merge-tree --write-tree` (never checks out or mutates anything),
+  and the review classification of the branch's changed files — with
+  expandable reasons per worktree. The scan is bounded and fail-closed:
+  a broken worktree degrades to an `error` entry instead of blanking the
+  report (`merge_readiness` IPC).
 - **Configurable watch excludes**: user-supplied gitignore-style patterns
   (palette → "Configure Ignored Paths…") on top of the built-in defaults
   (`node_modules`, `target`, `dist`, …). The shared matcher

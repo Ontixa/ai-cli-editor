@@ -11,6 +11,7 @@ import type {
   GitStaleEvent,
   GitStatus,
   LinkTarget,
+  MergeReadiness,
   PtyInfo,
   RestorePlan,
   RestoreResult,
@@ -101,6 +102,8 @@ export const api = {
   worktreeRemove: (path: string, force: boolean) =>
     invoke<void>("worktree_remove", { path, force }),
   worktreePrune: () => invoke<void>("worktree_prune"),
+  /** Read-only merge probe per non-main worktree (bounded, fail-closed). */
+  mergeReadiness: () => invoke<MergeReadiness[]>("merge_readiness"),
   checkpointCreate: (label?: string, sessionId?: string) =>
     invoke<CheckpointMeta>("checkpoint_create", {
       label: label ?? null,

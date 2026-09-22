@@ -6,8 +6,6 @@ import {
   renameSession,
   stopSession,
   createAgentWorktree,
-  removeWorktree,
-  openWorktreeTerminal,
   createCheckpoint,
   restoreCheckpoint,
   deleteCheckpoint,
@@ -28,7 +26,8 @@ import {
   usageTokens,
   usageCostLabel,
 } from "../../lib/agents";
-import type { AgentSession, CheckpointMeta, RestorePlan, WorktreeInfo } from "../../lib/types";
+import type { AgentSession, CheckpointMeta, RestorePlan } from "../../lib/types";
+import { WorktreeSection } from "./Worktrees";
 
 function stateClass(s: AgentSession): string {
   return `sess-dot ${s.state}`;
@@ -290,71 +289,6 @@ function NewWorktreeForm({ onDone }: { onDone: () => void }) {
   );
 }
 
-function WorktreeRow({ w }: { w: WorktreeInfo }) {
-  const agents = useStore(store, (s) => s.agents, shallow);
-  const [error, setError] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState(false);
-  const available = agents.filter((a) => a.available);
-  if (w.main) return null;
-  return (
-    <div className="wt-row">
-      <div className="wt-head">
-        <span className="sess-tag" title={w.absPath}>
-          ⎇ {w.path}
-        </span>
-        {w.branch && <span className="dim">{w.branch}</span>}
-        {w.dirty && <span className="sess-tag warn">dirty</span>}
-        {w.missing && <span className="sess-tag err">missing</span>}
-      </div>
-      <div className="sess-actions">
-        <button className="mini-btn" onClick={() => openWorktreeTerminal(w.path)}>
-          terminal
-        </button>
-        {available.slice(0, 3).map((a) => (
-          <button
-            key={a.id}
-            className="mini-btn"
-            title={`Run ${a.name} in ${w.path}`}
-            onClick={() => openWorktreeTerminal(w.path, a)}
-          >
-            {a.id}
-          </button>
-        ))}
-        {confirming ? (
-          <>
-            <button
-              className="mini-btn danger"
-              onClick={() => {
-                void removeWorktree(w.path, true).then((e) => {
-                  setError(e);
-                  setConfirming(false);
-                });
-              }}
-            >
-              discard{w.dirty ? " changes" : ""}
-            </button>
-            <button className="mini-btn" onClick={() => setConfirming(false)}>
-              keep
-            </button>
-          </>
-        ) : (
-          <button
-            className="mini-btn danger"
-            title={w.dirty ? "Worktree has uncommitted changes" : "Remove worktree"}
-            onClick={() => {
-              if (w.dirty) setConfirming(true);
-              else void removeWorktree(w.path, false).then(setError);
-            }}
-          >
-            remove
-          </button>
-        )}
-      </div>
-      {error && <div className="banner err">{error}</div>}
-    </div>
-  );
-}
-
 function CheckpointRow({ c }: { c: CheckpointMeta }) {
   const [plan, setPlan] = useState<RestorePlan | null>(null);
   const [open, setOpen] = useState(false);
@@ -425,7 +359,6 @@ function CheckpointRow({ c }: { c: CheckpointMeta }) {
 export function Agents() {
   const sessions = useStore(store, (s) => s.sessions, shallow);
   const collisions = useStore(store, (s) => s.collisions, shallow);
-  const worktrees = useStore(store, (s) => s.worktrees, shallow);
   const checkpoints = useStore(store, (s) => s.checkpoints, shallow);
   const usage = useStore(store, (s) => s.usage);
   const isRepo = useStore(store, (s) => s.git.isRepo);
@@ -569,19 +502,7 @@ export function Agents() {
         </>
       )}
 
-      {isRepo && worktrees.filter((w) => !w.main).length > 0 && (
-        <>
-          <div className="panel-subhead">
-            <span className="dim">worktrees</span>
-            <span className="count">{worktrees.filter((w) => !w.main).length}</span>
-          </div>
-          {worktrees
-            .filter((w) => !w.main)
-            .map((w) => (
-              <WorktreeRow key={w.path} w={w} />
-            ))}
-        </>
-      )}
+      {isRepo && <WorktreeSection />}
 
       {isRepo && checkpoints.length > 0 && (
         <>
