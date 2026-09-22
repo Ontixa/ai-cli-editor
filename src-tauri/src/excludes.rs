@@ -283,11 +283,7 @@ mod tests {
         assert!(r.set_user_patterns(vec!["C:/abs".into()]).is_err());
         assert!(r.set_user_patterns(vec!["x".repeat(200)]).is_err());
         assert!(r
-            .set_user_patterns(
-                (0..=MAX_USER_PATTERNS)
-                    .map(|i| format!("p{i}"))
-                    .collect()
-            )
+            .set_user_patterns((0..=MAX_USER_PATTERNS).map(|i| format!("p{i}")).collect())
             .is_err());
     }
 }

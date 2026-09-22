@@ -432,13 +432,12 @@ mod tests {
             .unwrap();
 
         // Excluded dir: no raw events at all.
-        let ev = Event::new(EventKind::Create(CreateKind::Any))
-            .add_path(root.join("scratch/a.txt"));
+        let ev =
+            Event::new(EventKind::Create(CreateKind::Any)).add_path(root.join("scratch/a.txt"));
         assert!(raw_from_event(root, &ev, &rules).is_empty());
 
         // Normal path survives as a create.
-        let ev = Event::new(EventKind::Create(CreateKind::Any))
-            .add_path(root.join("src/a.txt"));
+        let ev = Event::new(EventKind::Create(CreateKind::Any)).add_path(root.join("src/a.txt"));
         assert_eq!(
             raw_from_event(root, &ev, &rules),
             vec![Create("src/a.txt".into())]
