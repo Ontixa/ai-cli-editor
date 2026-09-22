@@ -5,6 +5,7 @@
 //! merged per path, renamed pairs are detected, and batches are emitted at a
 //! bounded rate so the frontend never has to process a flood.
 
+use crate::excludes::IgnoreRules;
 use crate::paths;
 use notify::{Event, EventKind, RecursiveMode, Watcher as _};
 use serde::Serialize;
@@ -19,23 +20,6 @@ use std::time::{Duration, Instant};
 const QUIET_MS: u64 = 120;
 /// Maximum time a batch may accumulate before flushing anyway.
 const MAX_BATCH_MS: u64 = 400;
-
-/// Directory names never surfaced as change events. `.git` is mandatory;
-/// the rest are default noise reducers (a settings surface can override later).
-const IGNORED_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    "out",
-    ".next",
-    ".turbo",
-    ".cache",
-    "coverage",
-    ".idea",
-    ".vscode",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,24 +174,16 @@ pub fn merge_raw_events(events: Vec<RawEvent>) -> Vec<FsChange> {
         .collect()
 }
 
-/// Is a single path component (file/dir name) on the ignore list?
-pub fn is_ignored_component(name: &str) -> bool {
-    IGNORED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d))
-}
-
-fn is_ignored_rel(rel: &str) -> bool {
-    rel.split('/').any(is_ignored_component)
-}
-
 /// Translate a `notify` event into raw events (workspace-relative).
-fn raw_from_event(root: &Path, ev: &Event) -> Vec<RawEvent> {
+/// Excluded paths are dropped here, before any merge work happens.
+fn raw_from_event(root: &Path, ev: &Event, excludes: &IgnoreRules) -> Vec<RawEvent> {
     use notify::event::{ModifyKind, RenameMode};
     let rels: Vec<String> = ev
         .paths
         .iter()
         .filter_map(|p| p.canonicalize().ok().or_else(|| Some(p.clone())))
         .filter_map(|abs| paths::rel_of(root, &abs))
-        .filter(|r| !r.is_empty() && !is_ignored_rel(r))
+        .filter(|r| !r.is_empty() && !excludes.is_excluded_path(r))
         .collect();
     if rels.is_empty() {
         return Vec::new();
@@ -255,18 +231,20 @@ pub struct FsWatcher {
 
 /// Start watching `root` recursively. `emit` is called with each merged
 /// batch (already debounced); `hook` gets the same batch synchronously first
-/// (index update) — keep it fast.
+/// (index update) — keep it fast. `excludes` is the shared ignore matcher;
+/// updates reach the running watcher without a restart.
 pub fn start(
     root: PathBuf,
     emit: Arc<dyn Fn(Vec<FsChange>) + Send + Sync>,
     hook: Option<BatchHook>,
+    excludes: Arc<IgnoreRules>,
 ) -> Result<FsWatcher, notify::Error> {
     let (tx, rx) = channel::<Vec<RawEvent>>();
 
     let watch_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
         if let Ok(ev) = res {
-            let raws = raw_from_event(&watch_root, &ev);
+            let raws = raw_from_event(&watch_root, &ev, &excludes);
             if !raws.is_empty() {
                 let _ = tx.send(raws);
             }
@@ -433,9 +411,37 @@ mod tests {
 
     #[test]
     fn ignored_dirs_filtered() {
-        assert!(is_ignored_rel("node_modules/x/index.js"));
-        assert!(is_ignored_rel(".git/index"));
-        assert!(is_ignored_rel("a/target/bin"));
-        assert!(!is_ignored_rel("src/main.rs"));
+        let rules = IgnoreRules::new();
+        assert!(rules.is_excluded_path("node_modules/x/index.js"));
+        assert!(rules.is_excluded_path(".git/index"));
+        assert!(rules.is_excluded_path("a/target/bin"));
+        assert!(!rules.is_excluded_path("src/main.rs"));
+    }
+
+    #[test]
+    fn raw_event_respects_excludes() {
+        use notify::event::CreateKind;
+        let root = if cfg!(windows) {
+            Path::new("C:/ws")
+        } else {
+            Path::new("/ws")
+        };
+        let rules = IgnoreRules::new();
+        rules
+            .set_user_patterns(vec!["scratch".to_string()])
+            .unwrap();
+
+        // Excluded dir: no raw events at all.
+        let ev = Event::new(EventKind::Create(CreateKind::Any))
+            .add_path(root.join("scratch/a.txt"));
+        assert!(raw_from_event(root, &ev, &rules).is_empty());
+
+        // Normal path survives as a create.
+        let ev = Event::new(EventKind::Create(CreateKind::Any))
+            .add_path(root.join("src/a.txt"));
+        assert_eq!(
+            raw_from_event(root, &ev, &rules),
+            vec![Create("src/a.txt".into())]
+        );
     }
 }

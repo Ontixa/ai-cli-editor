@@ -10,6 +10,7 @@
 | `paths.rs`      | `normalize`, `resolve_existing`, `resolve_for_write`, `rel_of` — workspace containment         |
 | `fs_ops.rs`     | `list_dir` (lazy, sorted), `read_file` (8 MB cap, binary sniff), `write_file`                  |
 | `watcher.rs`    | notify → debounce/merge → `fs:batch`; `merge_raw_events` is pure/tested                        |
+| `excludes.rs`   | `IgnoreRules` — built-in + user gitignore patterns; shared matcher swapped live                |
 | `index.rs`      | `FileIndex` — quick-open path list, watcher-patched                                            |
 | `pty.rs`        | `PtyRegistry`, `SpawnSpec`, reader+waiter threads, base64 out                                  |
 | `session.rs`    | `AgentSession` registry: lifecycle, file attribution, collisions, git summary, bounded history |
@@ -34,6 +35,7 @@
 | `lib/term-links.ts`     | `path:line:col` extraction from terminal text                                                               |
 | `lib/diff.ts`           | unified-diff parser → render model                                                                          |
 | `lib/activity.ts`       | timeline ingest + grouping                                                                                  |
+| `lib/watch-excludes.ts` | watch-exclude pattern parse/format/sanitize/merge (mirrors `excludes.rs`)                                   |
 | `lib/agents.ts`         | session display helpers: names, age, review labels, collision summaries                                     |
 | `lib/editor-manager.ts` | CodeMirror state/view lifecycle outside React                                                               |
 | `lib/cm-theme.ts`       | editor + syntax theme                                                                                       |

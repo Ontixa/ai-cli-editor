@@ -108,6 +108,12 @@ export function registerCommands() {
       run: () => A.toggleTheme(),
     },
     {
+      id: "workbench.watchExcludes",
+      title: "Configure Ignored Paths…",
+      category: "Preferences",
+      run: () => A.setExcludesOpen(true),
+    },
+    {
       id: "workbench.toggleDiffMode",
       title: "Toggle Diff Mode (Unified / Split)",
       category: "View",

@@ -21,12 +21,15 @@ No network, no plugins beyond `dialog`. The PTY is the integration layer.
                 │ session:update               │ pty_*, search_*,
                 │                              │ session_*, worktree_*,
                 │                              │ checkpoint_*,
-                │                              │ review_summaries
+                │                              │ review_summaries,
+                │                              │ get/set_watch_excludes
 ┌───────────────┴──────────────────────────────▼────────────────┐
 │  Rust (src-tauri)                                              │
 │  paths.rs     normalize + containment (all fs entry points)    │
 │  fs_ops.rs    lazy list_dir, bounded read_file, write_file     │
 │  watcher.rs   notify → debounce(120ms quiet/400ms max) → merge │
+│  excludes.rs  watch-exclude rules (defaults + user gitignore   │
+│               patterns), hot-swapped shared matcher            │
 │  index.rs     quick-open index (ignore-walk + watcher updates) │
 │  pty.rs       portable-pty sessions, reader/waiter threads     │
 │  session.rs   AgentSession registry: lifecycle, attribution,   │
@@ -65,7 +68,9 @@ oldPath? }` — workspace-relative, `/`-separated, already deduplicated.
 notify events → channel → debounce thread:
 
 - accumulate until 120 ms quiet or 400 ms since first event
-- drop ignored components (`.git` always; default noise dirs)
+- drop excluded paths via the shared `IgnoreRules` matcher: built-in
+  defaults + user gitignore-style patterns (`set_watch_excludes` swaps it
+  live; `.git` is a hard rule no `!` whitelist can lift)
 - merge per path: create+modify→created, create+delete→nothing,
   modify+delete→deleted, delete+create→created, rename pairs fold
 - apply to file index synchronously, then emit `fs:batch` + `git:stale`

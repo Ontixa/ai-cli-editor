@@ -3,6 +3,7 @@
 //! at a time — starting a new one cancels the previous.
 
 use crate::error::{AppError, AppResult};
+use crate::excludes::IgnoreRules;
 use crate::paths;
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
@@ -52,12 +53,15 @@ impl SearchRegistry {
     }
 
     /// Start a search; returns the search id. Results stream back through
-    /// `emit("chunk", ...)` / `emit("done", ...)` callbacks.
+    /// `emit("chunk", ...)` / `emit("done", ...)` callbacks. `excludes` is
+    /// applied by the fallback walker; the rg path relies on rg's own
+    /// gitignore handling plus `--glob '!.git'`, as before.
     pub fn start(
         &self,
         root: PathBuf,
         query: String,
         opts: SearchOpts,
+        excludes: Arc<IgnoreRules>,
         emit: SearchEmit,
     ) -> AppResult<u64> {
         if query.trim().is_empty() {
@@ -69,7 +73,7 @@ impl SearchRegistry {
         if crate::platform::find_on_path(rg_bin()).is_some() {
             self.start_rg(id, root, query, opts, emit)
         } else {
-            self.start_fallback(id, root, query, opts, emit)
+            self.start_fallback(id, root, query, opts, excludes, emit)
         }
     }
 
@@ -132,6 +136,7 @@ impl SearchRegistry {
         root: PathBuf,
         query: String,
         opts: SearchOpts,
+        excludes: Arc<IgnoreRules>,
         emit: SearchEmit,
     ) -> AppResult<u64> {
         thread::spawn(move || {
@@ -144,12 +149,16 @@ impl SearchRegistry {
             let mut truncated = false;
             let mut last_flush = Instant::now();
 
+            let walk_root = root.clone();
             let walker = ignore::WalkBuilder::new(&root)
                 .hidden(false)
                 .git_ignore(true)
-                .filter_entry(|e| {
-                    e.file_name() != ".git"
-                        && !crate::watcher::is_ignored_component(&e.file_name().to_string_lossy())
+                .filter_entry(move |e| {
+                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    match paths::rel_of(&walk_root, e.path()) {
+                        Some(rel) => !excludes.is_excluded_entry(&rel, is_dir),
+                        None => true,
+                    }
                 })
                 .build();
 

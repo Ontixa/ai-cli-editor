@@ -3,13 +3,14 @@
 //! never loads file contents.
 
 use crate::error::AppResult;
+use crate::excludes::IgnoreRules;
 use crate::paths;
 use crate::watcher::{ChangeKind, FsChange};
 use ignore::WalkBuilder;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const MAX_INDEXED_FILES: usize = 100_000;
 
@@ -20,9 +21,10 @@ pub struct FileList {
     pub truncated: bool,
 }
 
-#[derive(Default)]
 pub struct FileIndex {
     inner: Mutex<IndexInner>,
+    /// Shared exclude matcher — the same rules the watcher applies.
+    excludes: Arc<IgnoreRules>,
 }
 
 #[derive(Default)]
@@ -33,8 +35,11 @@ struct IndexInner {
 }
 
 impl FileIndex {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(excludes: Arc<IgnoreRules>) -> Self {
+        Self {
+            inner: Mutex::new(IndexInner::default()),
+            excludes,
+        }
     }
 
     /// Drop all state (called on workspace switch).
@@ -59,14 +64,19 @@ impl FileIndex {
         }
         let mut files = BTreeSet::new();
         let mut truncated = false;
+        let walk_root = root.to_path_buf();
+        let excludes = self.excludes.clone();
         let walker = WalkBuilder::new(root)
-            .hidden(false) // include dotfiles except .git (filter below)
+            .hidden(false) // include dotfiles except .git (exclude rules)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .filter_entry(|e| {
-                e.file_name() != ".git"
-                    && !crate::watcher::is_ignored_component(&e.file_name().to_string_lossy())
+            .filter_entry(move |e| {
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                match paths::rel_of(&walk_root, e.path()) {
+                    Some(rel) => !excludes.is_excluded_entry(&rel, is_dir),
+                    None => true,
+                }
             })
             .build();
         for entry in walker.flatten() {
@@ -126,9 +136,13 @@ mod tests {
     use super::*;
     use crate::watcher::FsChange;
 
+    fn test_index() -> FileIndex {
+        FileIndex::new(Arc::new(IgnoreRules::new()))
+    }
+
     #[test]
     fn apply_updates() {
-        let idx = FileIndex::new();
+        let idx = test_index();
         // simulate built index
         {
             let mut g = idx.inner.lock().unwrap();
@@ -166,9 +180,29 @@ mod tests {
         std::fs::write(dir.join("src/a.rs"), b"x").unwrap();
         std::fs::write(dir.join(".git/objects/x"), b"x").unwrap();
         let root = dir.canonicalize().unwrap();
-        let idx = FileIndex::new();
+        let idx = test_index();
         let list = idx.list(&root).unwrap();
         assert!(!list.truncated);
+        assert_eq!(list.files, vec!["src/a.rs".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_respects_user_excludes() {
+        let dir = std::env::temp_dir().join("aice_test_index_excl");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("gen/out")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), b"x").unwrap();
+        std::fs::write(dir.join("gen/out/g.rs"), b"x").unwrap();
+        std::fs::write(dir.join("gen/top.rs"), b"x").unwrap();
+        let root = dir.canonicalize().unwrap();
+
+        let rules = Arc::new(IgnoreRules::new());
+        rules
+            .set_user_patterns(vec!["gen/**".to_string()])
+            .unwrap();
+        let idx = FileIndex::new(rules);
+        let list = idx.list(&root).unwrap();
         assert_eq!(list.files, vec!["src/a.rs".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }

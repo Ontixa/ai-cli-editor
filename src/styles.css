@@ -1532,6 +1532,28 @@ kbd {
 .confirm-dialog .dialog-label {
   white-space: pre-wrap;
 }
+.excludes-dialog {
+  width: 480px;
+}
+.dialog-label code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.dialog-textarea {
+  resize: vertical;
+  min-height: 96px;
+  line-height: 1.55;
+  white-space: pre;
+}
+.excludes-summary {
+  margin-top: 8px;
+  margin-bottom: 0;
+  font-size: 11px;
+}
+.excludes-summary .mono {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
 
 /* ============ welcome / misc ============ */
 .welcome {

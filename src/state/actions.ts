@@ -25,6 +25,7 @@ import { disposeTerm } from "../lib/terminal-manager";
 import { ingestChanges, pushNotice } from "../lib/activity";
 import { checkForUpdate, downloadAndInstall, relaunchApp } from "../lib/update";
 import { isSourcePath } from "../lib/lang";
+import { parseWatchExcludes, sanitizeWatchExcludes } from "../lib/watch-excludes";
 import type {
   AgentInfo,
   AgentSession,
@@ -72,6 +73,7 @@ function persistNow() {
     followAgent: s.followAgent,
     diffMode: s.diffMode,
     theme: s.theme,
+    watchExcludes: s.watchExcludes,
     recentFiles: s.recentFiles.slice(0, 20),
     recentProjects: s.recentProjects.slice(0, 12),
   });
@@ -102,6 +104,15 @@ export async function boot() {
     await bootV1(restored);
   }
 
+  // Restored watch excludes reach the backend matcher — shared and
+  // hot-swapped, so watchers already running still pick them up. Defaults
+  // are fetched once for the dialog's "always on" hint.
+  void api.setWatchExcludes(store.get().watchExcludes).catch(() => {});
+  void api
+    .getWatchExcludes()
+    .then((info) => store.set({ watchExcludeDefaults: info.defaults }))
+    .catch(() => {});
+
   // Sole intentional network call: check GitHub Releases for a signed update.
   void checkForUpdates();
 }
@@ -116,6 +127,7 @@ function restoreGlobalPrefs(restored: Record<string, unknown>) {
     followAgent: restored.followAgent !== false,
     diffMode: restored.diffMode === "unified" ? "unified" : "split",
     theme: restored.theme === "light" ? "light" : "dark",
+    watchExcludes: sanitizeWatchExcludes(restored.watchExcludes),
     recentFiles: Array.isArray(restored.recentFiles)
       ? (restored.recentFiles as string[]).filter((x) => typeof x === "string")
       : [],
@@ -1242,6 +1254,32 @@ export async function runSearch(query: string, caseSensitive = false, regex = fa
 export function cancelSearch() {
   void api.searchCancel();
   store.set({ search: { ...store.get().search, running: false } });
+}
+
+// ---------- watch excludes ----------
+
+export function setExcludesOpen(open: boolean) {
+  store.set({ excludesOpen: open });
+}
+
+/**
+ * Validate + apply the ignored-paths list. Returns an error string to keep
+ * the dialog open, or null on success. The backend matcher swaps live —
+ * already-running watchers pick it up; quick-open indexes are rebuilt on
+ * demand (`fileIndex: null` forces a refetch under the new rules).
+ */
+export async function saveWatchExcludes(text: string): Promise<string | null> {
+  const { patterns, errors } = parseWatchExcludes(text);
+  if (errors.length) return errors.join("\n");
+  try {
+    const applied = await api.setWatchExcludes(patterns);
+    store.set({ watchExcludes: applied, fileIndex: null });
+    if (store.get().workspace) void ensureFileIndex();
+    schedulePersist();
+    return null;
+  } catch (e) {
+    return String(e);
+  }
 }
 
 // ---------- agent sessions ----------

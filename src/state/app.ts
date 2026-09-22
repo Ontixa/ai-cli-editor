@@ -187,8 +187,17 @@ export interface AppState {
   fileIndex: string[] | null;
   fileIndexTruncated: boolean;
 
+  /** User-configured watch excludes (gitignore-style patterns on top of
+   *  the built-in defaults); persisted in workspace-state.json and pushed
+   *  to the backend matcher. */
+  watchExcludes: string[];
+  /** Built-in watch-exclude defaults — fetched once for the dialog hint. */
+  watchExcludeDefaults: string[];
+
   quickOpen: boolean;
   paletteOpen: boolean;
+  /** Whether the ignored-paths dialog is open. */
+  excludesOpen: boolean;
   search: SearchUiState;
   recentFiles: string[];
   /** Recently opened project roots, most-recent-first (welcome screen). */
@@ -258,8 +267,11 @@ export const initialState: AppState = {
   review: {},
   fileIndex: null,
   fileIndexTruncated: false,
+  watchExcludes: [],
+  watchExcludeDefaults: [],
   quickOpen: false,
   paletteOpen: false,
+  excludesOpen: false,
   search: { id: 0, query: "", matches: [], running: false, truncated: false },
   recentFiles: [],
   recentProjects: [],

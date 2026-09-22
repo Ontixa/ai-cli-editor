@@ -31,9 +31,15 @@
   processes stay dead
 - Windows test toolchain fixes (manifest linking, ConPTY DSR in tests)
 
+## v0.3 — (in progress)
+
+- **Configurable watch excludes** — user gitignore-style patterns on top
+  of the built-in defaults (`excludes.rs`), shared live by the watcher,
+  quick-open index, and search fallback; persisted in
+  `workspace-state.json`, edited via palette → "Configure Ignored Paths…"
+
 ## Next
 
-- Configurable ignored directories / watch excludes
 - Bundled/embedded ripgrep for Windows installs without it
 - Session templates / one-click "new isolated agent" presets
 - Merge-readiness summary across agent worktrees

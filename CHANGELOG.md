@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Configurable watch excludes**: user-supplied gitignore-style patterns
+  (palette → "Configure Ignored Paths…") on top of the built-in defaults
+  (`node_modules`, `target`, `dist`, …). The shared matcher
+  (`src-tauri/src/excludes.rs`) is swapped live — running watchers, the
+  quick-open index walk, and the fallback search pick changes up without a
+  restart; `!` entries can lift a default, `.git` is never un-ignored.
+  Patterns persist in `workspace-state.json` and are validated on save.
+
 ### Fixed
 
 - Windows command transport now bypasses `cmd.exe` only for the exact supported

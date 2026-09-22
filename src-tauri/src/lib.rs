@@ -5,6 +5,7 @@
 
 pub mod checkpoint;
 pub mod error;
+pub mod excludes;
 pub mod fs_ops;
 pub mod git;
 pub mod index;
@@ -42,6 +43,9 @@ pub struct AppState {
     root: Mutex<Option<PathBuf>>,
     /// Open workspaces keyed by canonical root (project tabs).
     workspaces: Mutex<HashMap<PathBuf, WsEntry>>,
+    /// Shared watch-exclude matcher — hot-swapped by `set_watch_excludes`,
+    /// read live by every watcher, index walk, and fallback search.
+    excludes: Arc<excludes::IgnoreRules>,
     ptys: pty::PtyRegistry,
     search: search::SearchRegistry,
     sessions: session::SessionRegistry,
@@ -59,6 +63,7 @@ impl AppState {
         Self {
             root: Mutex::new(None),
             workspaces: Mutex::new(HashMap::new()),
+            excludes: Arc::new(excludes::IgnoreRules::new()),
             ptys: pty::PtyRegistry::new(),
             search: search::SearchRegistry::new(),
             sessions: session::SessionRegistry::new(),
@@ -233,13 +238,13 @@ fn open_workspace(
             }
         });
 
-        let w = watcher::start(root.clone(), emit, Some(hook))
+        let w = watcher::start(root.clone(), emit, Some(hook), state.excludes.clone())
             .map_err(|e| AppError::Internal(format!("watcher failed: {e}")))?;
         state.workspaces.lock().unwrap().insert(
             root.clone(),
             WsEntry {
                 _watcher: w,
-                index: Arc::new(index::FileIndex::new()),
+                index: Arc::new(index::FileIndex::new(state.excludes.clone())),
             },
         );
     }
@@ -466,6 +471,7 @@ fn search_start(
             case_sensitive,
             regex,
         },
+        state.excludes.clone(),
         emit,
     )
 }
@@ -473,6 +479,51 @@ fn search_start(
 #[tauri::command]
 fn search_cancel(state: State<AppState>) {
     state.search.cancel();
+}
+
+// ---------- watch excludes ----------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchExcludesInfo {
+    /// Built-in patterns, always active (a `!` user pattern can lift one;
+    /// `.git` is a hard rule regardless).
+    defaults: Vec<String>,
+    /// Normalized user-supplied patterns currently in effect.
+    user: Vec<String>,
+}
+
+#[tauri::command]
+fn get_watch_excludes(state: State<AppState>) -> WatchExcludesInfo {
+    WatchExcludesInfo {
+        defaults: excludes::DEFAULT_PATTERNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        user: state.excludes.user_patterns(),
+    }
+}
+
+/// Replace the user watch-exclude patterns. The shared matcher is swapped
+/// atomically, so running watchers pick it up immediately; invalid patterns
+/// are rejected wholesale and the previous rules stay live. Returns the
+/// normalized list that was applied.
+#[tauri::command]
+fn set_watch_excludes(
+    state: State<AppState>,
+    patterns: Vec<String>,
+) -> AppResult<Vec<String>> {
+    let applied = state
+        .excludes
+        .set_user_patterns(patterns)
+        .map_err(AppError::InvalidInput)?;
+    // Quick-open indexes built under the old rules are stale — reset them
+    // so the next list_all_files re-walks with the new rules. The explorer
+    // doesn't filter, so nothing else needs invalidating.
+    for entry in state.workspaces.lock().unwrap().values() {
+        entry.index.reset();
+    }
+    Ok(applied)
 }
 
 // ---------- terminal ----------
@@ -882,6 +933,8 @@ pub fn run() {
             git_commit,
             search_start,
             search_cancel,
+            get_watch_excludes,
+            set_watch_excludes,
             pty_spawn,
             pty_write,
             pty_write_bytes,
