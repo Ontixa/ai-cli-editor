@@ -20,6 +20,7 @@ No network, no plugins beyond `dialog`. The PTY is the integration layer.
                 │ search:chunk/done, git:stale │ write_file, git_status,
                 │ session:update               │ pty_*, search_*,
                 │                              │ session_*, worktree_*,
+                │                              │ merge_readiness,
                 │                              │ checkpoint_*,
                 │                              │ review_summaries,
                 │                              │ get/set_watch_excludes
@@ -37,6 +38,8 @@ No network, no plugins beyond `dialog`. The PTY is the integration layer.
 │  procmon.rs   process-tree monitor (sysinfo, 1.5 s, bounded)   │
 │  worktree.rs  git worktree create/list/remove/prune + dirty    │
 │               protection (.worktrees/, agent/<name> branches)  │
+│  merge_readiness.rs per-worktree ahead/behind, dirty state,    │
+│               merge-tree clean-merge probe, review reasons     │
 │  checkpoint.rs git-native patch snapshots + safe restore plan  │
 │  review.rs    deterministic file classification (path+content) │
 │  git.rs       git status porcelain v2, git diff, similar       │
@@ -127,6 +130,15 @@ command runs, child processes, git summary.
   plus added-line content signals (keys, crypto, destructive shell/SQL,
   exec/spawn, env access). Rank orders the review queue; reasons are always
   human-readable. Capped at 200 files per call.
+- **Merge readiness** probes each non-main worktree read-only:
+  `rev-list --left-right --count base...head` for ahead/behind, porcelain
+  v2 status for dirty/untracked counts, `merge-tree --write-tree` for a
+  clean-merge verdict (writes only unreachable odb objects — never refs,
+  index, or worktrees), and path-only `review` classification of the
+  branch's changed files. Per-worktree failures degrade to an `error`
+  field; ≤24 worktrees / ≤100 classified paths / ≤25 conflict names.
+  Refreshes on activation, worktree/commit mutations, and the cockpit's
+  manual button — never polled.
 
 ## State
 

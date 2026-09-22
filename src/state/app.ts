@@ -6,6 +6,7 @@ import type {
   CheckpointMeta,
   Collision,
   GitStatus,
+  MergeReadiness,
   ReviewedFile,
   SearchMatch,
   UpdateState,
@@ -97,6 +98,8 @@ export interface ProjectSnapshot {
   worktrees: WorktreeInfo[];
   checkpoints: CheckpointMeta[];
   review: Record<string, ReviewedFile>;
+  /** Per-worktree merge-readiness probe results (advisory, may be stale). */
+  mergeReadiness: MergeReadiness[];
   fileIndex: string[] | null;
   fileIndexTruncated: boolean;
   search: SearchUiState;
@@ -183,6 +186,9 @@ export interface AppState {
   checkpoints: CheckpointMeta[];
   /** Deterministic review classification keyed by path. */
   review: Record<string, ReviewedFile>;
+  /** Merge-readiness per non-main worktree — refreshed on activation,
+   *  worktree mutations, and commits; never auto-polled. */
+  mergeReadiness: MergeReadiness[];
 
   fileIndex: string[] | null;
   fileIndexTruncated: boolean;
@@ -265,6 +271,7 @@ export const initialState: AppState = {
   worktrees: [],
   checkpoints: [],
   review: {},
+  mergeReadiness: [],
   fileIndex: null,
   fileIndexTruncated: false,
   watchExcludes: [],

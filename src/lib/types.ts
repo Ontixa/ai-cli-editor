@@ -197,6 +197,36 @@ export interface WorktreeInfo {
   dirty: boolean;
 }
 
+// ---------- merge readiness ----------
+
+/** Read-only merge probe for one non-main worktree (merge_readiness.rs).
+ *  `error` set means part of the scan failed — other fields may be valid. */
+export interface MergeReadiness {
+  /** Repo-relative worktree path (".worktrees/<name>"). */
+  path: string;
+  branch?: string | null;
+  /** Ref compared against — main checkout's branch or its HEAD sha. */
+  base: string;
+  /** Commits on the worktree branch that base lacks. */
+  ahead: number;
+  /** Commits on base the branch lacks. */
+  behind: number;
+  /** Tracked files with staged or unstaged changes. */
+  dirty: number;
+  untracked: number;
+  /** merge-tree verdict. */
+  mergeable: "clean" | "conflicts" | "unknown" | string;
+  /** Paths that would conflict (capped backend-side). */
+  conflicts: string[];
+  /** Highest review rank among the branch's changed files (0 = none). */
+  reviewRank: number;
+  /** Category of the highest-ranked changed file, if any. */
+  reviewCategory?: string | null;
+  /** Compact human reasons: state facts first, then risk signals. */
+  reasons: string[];
+  error?: string | null;
+}
+
 // ---------- checkpoints ----------
 
 export interface CheckpointMeta {

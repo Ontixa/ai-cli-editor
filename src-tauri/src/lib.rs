@@ -9,6 +9,7 @@ pub mod excludes;
 pub mod fs_ops;
 pub mod git;
 pub mod index;
+pub mod merge_readiness;
 pub mod meter;
 pub mod paths;
 pub mod persist;
@@ -771,6 +772,13 @@ fn worktree_prune(state: State<AppState>) -> AppResult<()> {
     worktree::prune(&state.root()?)
 }
 
+/// Merge-readiness probe across non-main worktrees — read-only, bounded,
+/// and fail-closed per worktree (`error` field instead of aborting).
+#[tauri::command]
+fn merge_readiness(state: State<AppState>) -> AppResult<Vec<merge_readiness::MergeReadiness>> {
+    merge_readiness::report(&state.root()?)
+}
+
 // ---------- checkpoints ----------
 
 /// Checkpoints are created against a session's root when `sessionId` is
@@ -945,6 +953,7 @@ pub fn run() {
             worktree_create,
             worktree_remove,
             worktree_prune,
+            merge_readiness,
             checkpoint_create,
             checkpoint_list,
             checkpoint_plan,

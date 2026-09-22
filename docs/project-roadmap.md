@@ -37,12 +37,15 @@
   of the built-in defaults (`excludes.rs`), shared live by the watcher,
   quick-open index, and search fallback; persisted in
   `workspace-state.json`, edited via palette → "Configure Ignored Paths…"
+- **Merge-readiness summary** — per-worktree ahead/behind counts, dirty /
+  untracked state, a read-only `git merge-tree --write-tree` clean-merge
+  probe, and review-category reasons on each worktree row in the Agents
+  cockpit (`merge_readiness.rs`); bounded, fail-closed per worktree
 
 ## Next
 
 - Bundled/embedded ripgrep for Windows installs without it
 - Session templates / one-click "new isolated agent" presets
-- Merge-readiness summary across agent worktrees
 - Session export (bounded metadata receipt)
 - Resource usage display in the cockpit
 
