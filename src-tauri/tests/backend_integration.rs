@@ -146,8 +146,13 @@ fn watcher_reports_created_and_modified() {
         let _ = tx.send(batch);
     });
 
-    let _w = watcher::start(dir.clone(), emit, None, Arc::new(excludes::IgnoreRules::new()))
-        .expect("watcher");
+    let _w = watcher::start(
+        dir.clone(),
+        emit,
+        None,
+        Arc::new(excludes::IgnoreRules::new()),
+    )
+    .expect("watcher");
     // Let the watcher settle before producing events.
     std::thread::sleep(Duration::from_millis(300));
 

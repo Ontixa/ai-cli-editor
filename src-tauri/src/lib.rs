@@ -509,10 +509,7 @@ fn get_watch_excludes(state: State<AppState>) -> WatchExcludesInfo {
 /// are rejected wholesale and the previous rules stay live. Returns the
 /// normalized list that was applied.
 #[tauri::command]
-fn set_watch_excludes(
-    state: State<AppState>,
-    patterns: Vec<String>,
-) -> AppResult<Vec<String>> {
+fn set_watch_excludes(state: State<AppState>, patterns: Vec<String>) -> AppResult<Vec<String>> {
     let applied = state
         .excludes
         .set_user_patterns(patterns)

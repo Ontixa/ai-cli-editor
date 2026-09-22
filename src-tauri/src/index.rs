@@ -198,9 +198,7 @@ mod tests {
         let root = dir.canonicalize().unwrap();
 
         let rules = Arc::new(IgnoreRules::new());
-        rules
-            .set_user_patterns(vec!["gen/**".to_string()])
-            .unwrap();
+        rules.set_user_patterns(vec!["gen/**".to_string()]).unwrap();
         let idx = FileIndex::new(rules);
         let list = idx.list(&root).unwrap();
         assert_eq!(list.files, vec!["src/a.rs".to_string()]);
