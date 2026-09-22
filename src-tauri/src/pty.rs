@@ -52,6 +52,13 @@ impl PtyRegistry {
     /// `emit` receives `(event_suffix, payload_json)` pairs to forward:
     ///   ("out",  base64 bytes), ("exit", {"id":..,"code":..})
     pub fn spawn(&self, spec: SpawnSpec, emit: PtyEmit) -> AppResult<PtyInfo> {
+        // Validate command transport before opening a PTY or creating a child.
+        let prepared = match &spec {
+            SpawnSpec::Command { program, args, .. } => {
+                Some(crate::platform::wrap_for_spawn(program, args)?)
+            }
+            SpawnSpec::Shell { .. } => None,
+        };
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let size = PtySize {
             rows: spec.rows().max(1),
@@ -70,9 +77,8 @@ impl PtyRegistry {
                 c.args(&shell.args);
                 c
             }
-            SpawnSpec::Command { program, args, .. } => {
-                // On Windows, .cmd/.bat/.ps1 shims need a host interpreter.
-                let (prog, wrapped_args) = crate::platform::wrap_for_spawn(program, args);
+            SpawnSpec::Command { .. } => {
+                let (prog, wrapped_args) = prepared.expect("command prepared above");
                 let mut c = CommandBuilder::new(prog);
                 c.args(wrapped_args);
                 c
