@@ -74,6 +74,13 @@ export function registerCommands() {
       run: () => A.toggleFollowAgent(),
     },
     {
+      id: "session.export",
+      title: "Export Session Receipt…",
+      category: "Session",
+      when: () => hasWorkspace() && store.get().sessions.length > 0,
+      run: () => A.openSessionExport(),
+    },
+    {
       id: "sidebar.files",
       title: "Show Files",
       category: "View",

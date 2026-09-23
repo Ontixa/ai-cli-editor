@@ -26,6 +26,7 @@ import { ingestChanges, pushNotice } from "../lib/activity";
 import { checkForUpdate, downloadAndInstall, relaunchApp } from "../lib/update";
 import { isSourcePath } from "../lib/lang";
 import { parseWatchExcludes, sanitizeWatchExcludes } from "../lib/watch-excludes";
+import { buildSessionReceipt, exportSummary, normalizeExportPath } from "../lib/session-export";
 import type {
   AgentInfo,
   AgentSession,
@@ -1345,6 +1346,58 @@ export async function stopSession(id: string) {
     await api.sessionStop(id);
   } catch {
     /* already exited */
+  }
+}
+
+// ---------- session export ----------
+
+/** Open the export dialog for a session (defaults to the most recently
+ *  active one when `sessionId` is omitted — e.g. from the palette). */
+export function openSessionExport(sessionId?: string) {
+  if (!store.get().workspace) return;
+  if (sessionId == null && store.get().sessions.length === 0) return;
+  store.set({ exportDialog: { sessionId: sessionId ?? null } });
+  markUserAction();
+}
+
+export function closeSessionExport() {
+  store.set({ exportDialog: null });
+}
+
+/**
+ * Write a bounded JSON receipt for `sessionId` to `path`
+ * (workspace-relative, or absolute inside the workspace). The receipt is
+ * metadata only — no terminal output, no file contents — and the backend
+ * re-caps every collection. Returns an error string or null on success.
+ */
+export async function exportSession(sessionId: string, path: string): Promise<string | null> {
+  const s = store.get();
+  const session = s.sessions.find((x) => x.id === sessionId);
+  const ws = s.workspace;
+  if (!ws) return "no workspace is open";
+  if (!session) return "session no longer exists";
+  const check = normalizeExportPath(path, ws.root);
+  if (!check.ok || !check.path) return check.error ?? "invalid path";
+  try {
+    // Fetch fresh at submit time — the receipt records what the registry
+    // holds now, not what the dialog previewed.
+    const [files, commands] = await Promise.all([
+      api.sessionFiles(sessionId),
+      api.sessionCommands(sessionId),
+    ]);
+    const receipt = buildSessionReceipt(session, files, commands, {
+      workspaceRoot: ws.root,
+    });
+    const res = await api.sessionExport(sessionId, check.path, receipt);
+    store.set({
+      activity: pushNotice(store.get().activity, "export", exportSummary(res)),
+    });
+    // The watcher will pick the new file up too; this just makes sure the
+    // parent listing refreshes even if the batch lands late.
+    invalidateDir(parentOf(res.path));
+    return null;
+  } catch (e) {
+    return String(e);
   }
 }
 

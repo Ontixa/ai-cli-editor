@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentInfo,
   CheckpointMeta,
+  CommandRun,
   DirEntry,
   FileData,
   FileList,
@@ -18,6 +19,8 @@ import type {
   ReviewedFile,
   SearchChunk,
   SearchDone,
+  SessionExport,
+  SessionReceipt,
   SessionsEvent,
   ShellSpec,
   WatchExcludesInfo,
@@ -92,6 +95,11 @@ export const api = {
   sessionRename: (id: string, label: string) => invoke<void>("session_rename", { id, label }),
   sessionStop: (id: string) => invoke<void>("session_stop", { id }),
   sessionFiles: (id: string) => invoke<FileTouch[]>("session_files", { id }),
+  /** Full command history (the snapshot carries only a preview). */
+  sessionCommands: (id: string) => invoke<CommandRun[]>("session_commands", { id }),
+  /** Write a bounded session receipt to a workspace-contained path. */
+  sessionExport: (id: string, path: string, receipt: SessionReceipt) =>
+    invoke<SessionExport>("export_session", { id, path, receipt }),
   worktreeList: () => invoke<WorktreeInfo[]>("worktree_list"),
   worktreeCreate: (name: string, branch?: string, base?: string) =>
     invoke<WorktreeInfo>("worktree_create", {

@@ -6,6 +6,7 @@
 pub mod checkpoint;
 pub mod error;
 pub mod excludes;
+pub mod export;
 pub mod fs_ops;
 pub mod git;
 pub mod index;
@@ -738,6 +739,35 @@ fn session_files(state: State<AppState>, id: String) -> AppResult<Vec<session::F
     state.sessions.touched_files(&id)
 }
 
+/// Full command history (the snapshot carries only a preview) — used by
+/// the session-export dialog for its capped receipt sample.
+#[tauri::command]
+fn session_commands(state: State<AppState>, id: String) -> AppResult<Vec<session::CommandRun>> {
+    state.sessions.command_runs(&id)
+}
+
+/// Write a bounded JSON receipt for one session: agent kind, lifecycle,
+/// worktree root, counts + capped samples of touched files and command
+/// runs, git + usage summaries. Never terminal output or file contents.
+/// `path` must resolve inside the workspace (`paths::resolve_for_create`);
+/// missing parent dirs are created, an existing target is replaced
+/// atomically.
+#[tauri::command]
+fn export_session(
+    state: State<AppState>,
+    id: String,
+    path: String,
+    receipt: export::SessionReceipt,
+) -> AppResult<export::ExportResult> {
+    let root = state.root()?;
+    // The session must belong to the active workspace — exporting an
+    // other-project session into this tree would mislabel the receipt.
+    if !state.sessions.in_workspace(&id, &root.to_string_lossy()) {
+        return Err(AppError::NotFound(format!("session {id}")));
+    }
+    export::write(&root, &id, &path, receipt)
+}
+
 // ---------- worktrees ----------
 
 #[tauri::command]
@@ -949,6 +979,8 @@ pub fn run() {
             session_rename,
             session_stop,
             session_files,
+            session_commands,
+            export_session,
             worktree_list,
             worktree_create,
             worktree_remove,

@@ -975,6 +975,30 @@ impl SessionRegistry {
         Ok(v)
     }
 
+    /// Full command-run history for one session (session export) — the
+    /// snapshot caps at MAX_SNAPSHOT_COMMANDS; this returns the whole
+    /// bounded deque in chronological order.
+    pub fn command_runs(&self, id: &str) -> AppResult<Vec<CommandRun>> {
+        let g = self.inner.lock().unwrap();
+        let s = g
+            .sessions
+            .get(id)
+            .ok_or_else(|| AppError::NotFound(format!("session {id}")))?;
+        Ok(s.commands.iter().cloned().collect())
+    }
+
+    /// True when `id` is a session rooted inside `workspace_root` — the
+    /// same scoping rule `snapshot()` uses. Export writes into the active
+    /// workspace, so sessions from other projects must not qualify.
+    pub fn in_workspace(&self, id: &str, workspace_root: &str) -> bool {
+        let g = self.inner.lock().unwrap();
+        let root_norm = crate::paths::normalize(workspace_root);
+        let prefix = format!("{root_norm}/");
+        g.sessions
+            .get(id)
+            .is_some_and(|s| s.root == root_norm || s.root.starts_with(&prefix))
+    }
+
     /// Replace the registry with persisted history (all marked stale).
     /// Live sessions are never resurrected from disk. Sessions archived
     /// before the finalized counters existed fold their meter in once —
@@ -1446,5 +1470,40 @@ mod tests {
         let (reg, _) = reg_with(1, "");
         let ev = reg.snapshot("D:/other");
         assert!(ev.sessions.is_empty());
+    }
+
+    #[test]
+    fn command_runs_returns_full_history() {
+        let (reg, ids) = reg_with(1, "");
+        reg.note_children(
+            &ids[0],
+            vec![
+                ChildProc {
+                    pid: 500,
+                    name: "cargo.exe".into(),
+                },
+                ChildProc {
+                    pid: 501,
+                    name: "node.exe".into(),
+                },
+            ],
+            now_ms(),
+        );
+        let runs = reg.command_runs(&ids[0]).unwrap();
+        assert_eq!(runs.len(), 2);
+        // Chronological order — the export samples the newest tail.
+        assert_eq!(runs[0].pid, 500);
+        assert_eq!(runs[1].pid, 501);
+        assert!(reg.command_runs("nope").is_err());
+    }
+
+    #[test]
+    fn in_workspace_scopes_like_snapshot() {
+        let (reg, ids) = reg_with(1, "sub");
+        assert!(reg.in_workspace(&ids[0], "C:/repo"));
+        assert!(!reg.in_workspace(&ids[0], "D:/other"));
+        assert!(!reg.in_workspace("nope", "C:/repo"));
+        // "C:/repo2" must not match root "C:/repo" via prefix.
+        assert!(!reg.in_workspace(&ids[0], "C:/repo2"));
     }
 }

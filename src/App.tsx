@@ -19,6 +19,7 @@ import { QuickOpen } from "./components/overlays/QuickOpen";
 import { CommandPalette } from "./components/overlays/CommandPalette";
 import { ConfirmModal } from "./components/overlays/ConfirmModal";
 import { ExcludesDialog } from "./components/overlays/ExcludesDialog";
+import { ExportSessionDialog } from "./components/overlays/ExportSessionDialog";
 import { Splitter } from "./components/Splitter";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
@@ -86,6 +87,7 @@ export default function App() {
       <CommandPalette />
       <ConfirmModal />
       <ExcludesDialog />
+      <ExportSessionDialog />
     </div>
   );
 }
