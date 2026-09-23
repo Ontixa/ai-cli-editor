@@ -10,6 +10,7 @@ import {
   restoreCheckpoint,
   deleteCheckpoint,
   checkpointPlan,
+  openSessionExport,
   markUserAction,
 } from "../../state/actions";
 import {
@@ -221,6 +222,13 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
             </button>
           </>
         )}
+        <button
+          className="mini-btn"
+          title="Write a bounded JSON receipt (metadata only — no terminal output, no file contents)"
+          onClick={() => openSessionExport(s.id)}
+        >
+          export
+        </button>
       </div>
     </div>
   );

@@ -204,6 +204,9 @@ export interface AppState {
   paletteOpen: boolean;
   /** Whether the ignored-paths dialog is open. */
   excludesOpen: boolean;
+  /** Session-export dialog request: null = closed; `sessionId` null lets
+   *  the dialog pick the most recently active session. */
+  exportDialog: { sessionId: string | null } | null;
   search: SearchUiState;
   recentFiles: string[];
   /** Recently opened project roots, most-recent-first (welcome screen). */
@@ -279,6 +282,7 @@ export const initialState: AppState = {
   quickOpen: false,
   paletteOpen: false,
   excludesOpen: false,
+  exportDialog: null,
   search: { id: 0, query: "", matches: [], running: false, truncated: false },
   recentFiles: [],
   recentProjects: [],

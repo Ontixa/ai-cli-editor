@@ -184,6 +184,81 @@ export interface SessionsEvent {
   usage: UsageReport;
 }
 
+// ---------- session export ----------
+
+/** `aice-session-receipt` v1 — the bounded JSON document written by
+ *  `export_session`. Built by lib/session-export.ts, then re-capped and
+ *  re-provenanced by export.rs (format/version/exportedAt/workspaceRoot
+ *  are authoritative backend-side). Metadata only: no terminal output,
+ *  no file contents. */
+export interface SessionReceipt {
+  format: string;
+  version: number;
+  exportedAt: number;
+  /** Canonical workspace root the receipt was written under. */
+  workspaceRoot: string;
+  session: {
+    id: string;
+    label: string;
+    agent: string;
+    /** "spawn" | "process-tree" */
+    agentSource: string;
+    program?: string | null;
+    pid?: number | null;
+  };
+  lifecycle: {
+    state: SessionState;
+    live: boolean;
+    startedAt: number;
+    lastActivityAt: number;
+    endedAt?: number | null;
+    exitCode?: number | null;
+  };
+  worktree: {
+    /** Absolute session root ('/'-normalized). */
+    root: string;
+    /** Session root relative to the workspace root ("" = same dir). */
+    relPrefix: string;
+  };
+  git?: SessionGit | null;
+  usage: {
+    tokensIn: number;
+    tokensOut: number;
+    tokensTotal: number;
+    tokensCached: number;
+    costUsd: number;
+    costEstimated: number;
+    model?: string | null;
+    contextLeftPct?: number | null;
+  };
+  files: {
+    /** True touched-file count before sampling. */
+    total: number;
+    /** total > items.length — the sample is bounded, not complete. */
+    truncated: boolean;
+    /** Most-recently-touched first. */
+    items: FileTouch[];
+  };
+  commands: {
+    total: number;
+    truncated: boolean;
+    /** Chronological — the newest capped sample. */
+    items: CommandRun[];
+  };
+}
+
+/** export_session result — where the receipt landed + what went in. */
+export interface SessionExport {
+  /** Workspace-relative path that was written ('/'-normalized). */
+  path: string;
+  bytes: number;
+  /** Sample sizes written vs. the session's true counts. */
+  files: number;
+  filesTotal: number;
+  commands: number;
+  commandsTotal: number;
+}
+
 // ---------- worktrees ----------
 
 export interface WorktreeInfo {

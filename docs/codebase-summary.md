@@ -14,6 +14,7 @@
 | `index.rs`      | `FileIndex` — quick-open path list, watcher-patched                                            |
 | `pty.rs`        | `PtyRegistry`, `SpawnSpec`, reader+waiter threads, base64 out                                  |
 | `session.rs`    | `AgentSession` registry: lifecycle, file attribution, collisions, git summary, bounded history |
+| `export.rs`     | `export_session` — bounded JSON session receipt (metadata only), capped + re-provenanced write |
 | `procmon.rs`    | descendant-only process monitor (sysinfo), command classification, exit codes                  |
 | `worktree.rs`   | `git worktree` create/list/remove/prune under `.worktrees/`, dirty protection                  |
 | `checkpoint.rs` | Git-native patch + metadata snapshots under `<git-dir>/aice-checkpoints/`; safe restore        |
@@ -37,6 +38,7 @@
 | `lib/activity.ts`       | timeline ingest + grouping                                                                                  |
 | `lib/watch-excludes.ts` | watch-exclude pattern parse/format/sanitize/merge (mirrors `excludes.rs`)                                   |
 | `lib/agents.ts`         | session display helpers: names, age, review labels, collision summaries                                     |
+| `lib/session-export.ts` | receipt shaping/capping + export-path validation (mirrors `export.rs`/`paths.rs`)                           |
 | `lib/editor-manager.ts` | CodeMirror state/view lifecycle outside React                                                               |
 | `lib/cm-theme.ts`       | editor + syntax theme                                                                                       |
 | `state/app.ts`          | `AppState` shape + store instance                                                                           |

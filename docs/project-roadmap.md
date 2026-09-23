@@ -41,12 +41,16 @@
   untracked state, a read-only `git merge-tree --write-tree` clean-merge
   probe, and review-category reasons on each worktree row in the Agents
   cockpit (`merge_readiness.rs`); bounded, fail-closed per worktree
+- **Session export** — `export_session` writes a bounded JSON receipt
+  (agent kind, lifecycle, worktree root, counts + capped samples of
+  touched files and command runs, git + usage summaries) to a
+  workspace-contained path — metadata only, never terminal output or
+  file contents. Palette command + per-session card action
 
 ## Next
 
 - Bundled/embedded ripgrep for Windows installs without it
 - Session templates / one-click "new isolated agent" presets
-- Session export (bounded metadata receipt)
 - Resource usage display in the cockpit
 
 ## Explicit non-goals

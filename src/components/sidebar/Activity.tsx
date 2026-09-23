@@ -10,6 +10,7 @@ const KIND_META: Record<ActivityKind, { label: string; cls: string }> = {
   renamed: { label: "R", cls: "act-renamed" },
   terminal: { label: "▸", cls: "act-term" },
   exit: { label: "◦", cls: "act-term" },
+  export: { label: "⇧", cls: "act-term" },
 };
 
 export function Activity() {
