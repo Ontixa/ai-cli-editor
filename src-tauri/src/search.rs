@@ -70,6 +70,18 @@ impl SearchRegistry {
             return Err(AppError::InvalidInput("empty query".into()));
         }
         self.cancel();
+        // Reject an unparseable pattern up front so the command fails
+        // identically under both engines — in the rg path the parse error
+        // would otherwise die on a worker thread and surface as a silent
+        // empty result set. The fallback still builds its own matcher.
+        if opts.regex {
+            grep_regex::RegexMatcherBuilder::new()
+                .case_smart(!opts.case_sensitive)
+                .build(&query)
+                .map_err(|error| {
+                    AppError::InvalidInput(format!("invalid search query: {error}"))
+                })?;
+        }
         let id = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
         if crate::platform::find_on_path(rg_bin()).is_some() {
@@ -395,6 +407,28 @@ mod tests {
         use grep_matcher::Matcher;
         assert!(matcher.find(b"a.c").unwrap().is_some());
         assert!(matcher.find(b"abc").unwrap().is_none());
+    }
+
+    #[test]
+    fn start_rejects_an_invalid_regex_for_either_engine() {
+        // Whatever engine `start` would pick (rg on PATH or the embedded
+        // fallback), the same query must fail the command up front — the
+        // frontend can then show the error instead of "0 results".
+        let registry = SearchRegistry::new();
+        let emit: SearchEmit = Arc::new(|_, _| {});
+        let err = registry
+            .start(
+                std::env::temp_dir(),
+                "(".to_string(),
+                SearchOpts {
+                    case_sensitive: false,
+                    regex: true,
+                },
+                Arc::new(IgnoreRules::new()),
+                emit,
+            )
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
     }
 
     #[test]

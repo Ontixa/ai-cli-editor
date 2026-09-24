@@ -794,6 +794,12 @@ kbd {
 .search-status {
   padding: 2px 12px 7px;
   font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-status.err {
+  color: var(--red);
 }
 .search-results {
   flex: 1;

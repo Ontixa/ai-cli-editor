@@ -67,6 +67,9 @@ export interface SearchUiState {
   matches: SearchMatch[];
   running: boolean;
   truncated: boolean;
+  /** Rejection from `search_start` (e.g. an invalid regex). A failed
+   *  search must never be rendered as "0 results". */
+  error: string | null;
 }
 
 /** An open project tab (browser-tab semantics). */
@@ -292,7 +295,7 @@ export const initialState: AppState = {
   exportDialog: null,
   presetDialog: null,
   sessionPresets: [],
-  search: { id: 0, query: "", matches: [], running: false, truncated: false },
+  search: { id: 0, query: "", matches: [], running: false, truncated: false, error: null },
   recentFiles: [],
   recentProjects: [],
   confirm: null,

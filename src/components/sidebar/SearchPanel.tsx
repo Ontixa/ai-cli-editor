@@ -2,12 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { store } from "../../state/app";
 import { useStore } from "../../lib/store";
 import { openFile, runSearch, cancelSearch, markUserAction } from "../../state/actions";
-import type { SearchMatch } from "../../lib/types";
-
-interface FileGroup {
-  path: string;
-  matches: SearchMatch[];
-}
+import { groupSearchMatches, searchStatusText } from "../../lib/search";
 
 export function SearchPanel() {
   const search = useStore(store, (s) => s.search);
@@ -29,17 +24,17 @@ export function SearchPanel() {
     debounce.current = setTimeout(() => void runSearch(q, cs, rx), 280);
   };
 
-  const groups = useMemo<FileGroup[]>(() => {
-    const m = new Map<string, SearchMatch[]>();
-    for (const match of search.matches) {
-      const arr = m.get(match.path) ?? [];
-      arr.push(match);
-      m.set(match.path, arr);
-    }
-    return [...m.entries()].map(([path, matches]) => ({ path, matches }));
-  }, [search.matches]);
+  const groups = useMemo(() => groupSearchMatches(search.matches), [search.matches]);
 
   if (!workspace) return null;
+
+  const status = searchStatusText({
+    running: search.running,
+    query: search.query,
+    matchCount: search.matches.length,
+    truncated: search.truncated,
+    error: search.error,
+  });
 
   return (
     <div className="search-panel">
@@ -82,12 +77,11 @@ export function SearchPanel() {
           </button>
         </div>
       </div>
-      <div className="search-status dim">
-        {search.running
-          ? `searching… ${search.matches.length}`
-          : search.query
-            ? `${search.matches.length} results${search.truncated ? " (truncated)" : ""}`
-            : "type to search"}
+      <div
+        className={`search-status ${search.error ? "err" : "dim"}`}
+        title={search.error ?? undefined}
+      >
+        {status}
       </div>
       <div className="search-results">
         {groups.map((g) => (
@@ -110,7 +104,7 @@ export function SearchPanel() {
             ))}
           </div>
         ))}
-        {!search.running && search.query && groups.length === 0 && (
+        {!search.running && !search.error && search.query && groups.length === 0 && (
           <div className="empty-hint pad">no matches</div>
         )}
       </div>
