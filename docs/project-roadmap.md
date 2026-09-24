@@ -60,7 +60,12 @@
 
 ## Next
 
-- Bundled/embedded ripgrep for Windows installs without it
+- ~~Bundled/embedded ripgrep for Windows installs without it~~ — delivered
+  as embedded ripgrep: the fallback search now runs the same `grep-regex` +
+  `grep-searcher` engine ripgrep itself is built on, over the existing
+  bounded `ignore` walk. Hosts without `rg` keep the full search contract —
+  real regex queries, smart-case, UTF-16 decoding, and binary detection —
+  on every platform, with no sidecar binary to ship
 
 ## Explicit non-goals
 

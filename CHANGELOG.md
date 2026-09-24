@@ -8,6 +8,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Embedded ripgrep fallback**: on hosts without `rg` (the common Windows
+  case), workspace search now runs the actual ripgrep engine — `grep-regex`
+  + `grep-searcher`, the crates ripgrep itself is built on — over the
+  existing bounded `ignore` walk. The fallback now honors regex queries
+  (previously treated as literal substrings), applies the same smart-case
+  rule as the rg path, decodes UTF-16 files, and stops at binary content;
+  invalid regexes fail fast with a typed `InvalidInput` error instead of a
+  silent wrong-mode scan. No sidecar binary is shipped.
 - **Session presets**: named, reusable launch recipes — a detected agent
   CLI, custom command, or interactive shell plus argv and a cwd mode
   (workspace root or a fresh `.worktrees/<name>` checkout). Launching a
