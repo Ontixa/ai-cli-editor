@@ -27,6 +27,7 @@ import {
   usageTokens,
   usageCostLabel,
 } from "../../lib/agents";
+import { resourceReadout } from "../../lib/session-resources";
 import type { AgentSession, CheckpointMeta, RestorePlan } from "../../lib/types";
 import { WorktreeSection } from "./Worktrees";
 
@@ -47,6 +48,9 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
   const tokens = sessionTokens(s);
   const cost = sessionCost(s);
   const ctx = s.contextLeftPct;
+  // Process-tree CPU/RSS sample — live sessions only; "—" per metric the
+  // OS wouldn't share, and the chip greys when the sample goes stale.
+  const res = s.live ? resourceReadout(s.resources, now) : null;
   const tokenTitle = [
     s.tokensIn ? `in ${s.tokensIn.toLocaleString()}` : "",
     s.tokensOut ? `out ${s.tokensOut.toLocaleString()}` : "",
@@ -129,6 +133,17 @@ function SessionCard({ s, now }: { s: AgentSession; now: number }) {
             title={cost.estimated ? "estimated cost (static price table)" : "cost reported by CLI"}
           >
             {fmtCost(cost.usd, cost.estimated)}
+          </span>
+        )}
+        {res && (
+          <span
+            className={`sess-tag res${res.stale ? " stale" : ""}`}
+            title={
+              `process-tree usage — cpu ${res.cpu} of machine · rss ${res.mem}` +
+              (res.stale ? " — sample stale" : "")
+            }
+          >
+            cpu {res.cpu} · {res.mem}
           </span>
         )}
         {currentCmd && (

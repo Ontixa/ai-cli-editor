@@ -105,6 +105,24 @@ pub struct SessionGit {
     pub staged: usize,
 }
 
+/// One resource-usage sample for a session's whole process tree, taken by
+/// the procmon poll. Each metric is `None` when the OS wouldn't share it —
+/// the UI must render "—" then, never a fabricated zero. Live-only: dead
+/// sessions carry `None` in the snapshot, never a frozen last reading.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionResources {
+    /// Tree CPU use as a percent of total machine capacity — sysinfo's
+    /// per-process usage (100% = one core) summed over the tree, divided
+    /// by the logical CPU count. `None` when nothing was readable.
+    pub cpu_pct: Option<f32>,
+    /// Resident memory summed over the tree, in bytes.
+    pub rss_bytes: Option<u64>,
+    /// When the sample was taken (ms epoch) — the frontend greys out
+    /// readings that stop refreshing.
+    pub sampled_at: u64,
+}
+
 /// What the frontend receives per session in `session:update`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +152,8 @@ pub struct SessionSnapshot {
     pub commands: Vec<CommandRun>,
     pub children: Vec<ChildProc>,
     pub git: Option<SessionGit>,
+    /// Latest procmon resource sample for the process tree (live only).
+    pub resources: Option<SessionResources>,
     /// Token usage the CLI reported on its output (see meter.rs).
     pub tokens_in: u64,
     pub tokens_out: u64,
@@ -260,6 +280,8 @@ struct AgentSession {
     children: Vec<ChildProc>,
     git: Option<SessionGit>,
     git_at: u64,
+    /// Latest procmon resource sample — live-only, cleared on exit.
+    resources: Option<SessionResources>,
     /// Usage meter fed from this session's PTY output.
     meter: crate::meter::Meter,
     /// True once the meter has been folded into the finalized counters —
@@ -346,6 +368,7 @@ impl AgentSession {
             commands,
             children: self.children.clone(),
             git: self.git.clone(),
+            resources: self.resources,
             tokens_in: self.meter.tokens_in,
             tokens_out: self.meter.tokens_out,
             tokens_total: self.meter.tokens_total,
@@ -464,6 +487,7 @@ impl From<PersistedSession> for AgentSession {
             children: Vec::new(),
             git: None,
             git_at: 0,
+            resources: None,
             meter: crate::meter::Meter::with_totals(
                 p.tokens_in,
                 p.tokens_out,
@@ -573,6 +597,7 @@ impl SessionRegistry {
             children: Vec::new(),
             git: None,
             git_at: 0,
+            resources: None,
             meter: crate::meter::Meter::default(),
             metered_final: false,
         };
@@ -617,6 +642,7 @@ impl SessionRegistry {
             s.exit_code = code;
             s.pid = None;
             s.children.clear();
+            s.resources = None;
             for c in s.commands.iter_mut().filter(|c| c.running) {
                 c.running = false;
                 c.ended_at = Some(now);
@@ -645,6 +671,7 @@ impl SessionRegistry {
                 s.ended_at = Some(now);
                 s.pid = None;
                 s.children.clear();
+                s.resources = None;
                 for c in s.commands.iter_mut().filter(|c| c.running) {
                     c.running = false;
                     c.ended_at = Some(now);
@@ -674,6 +701,7 @@ impl SessionRegistry {
                 }
                 s.pid = None;
                 s.children.clear();
+                s.resources = None;
                 for c in s.commands.iter_mut().filter(|c| c.running) {
                     c.running = false;
                     c.ended_at = Some(now);
@@ -831,6 +859,22 @@ impl SessionRegistry {
             }
         }
         changed
+    }
+
+    /// Store the latest resource-usage sample for a live session. Called
+    /// by the procmon poll every tick — deliberately does NOT touch
+    /// `last_activity_at`: a sampled-but-quiet agent must not read "busy".
+    /// Returns true when the stored sample changed.
+    pub fn note_resources(&self, session_id: &str, res: SessionResources) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        let Some(s) = g.sessions.get_mut(session_id) else {
+            return false;
+        };
+        if !s.live || s.resources == Some(res) {
+            return false;
+        }
+        s.resources = Some(res);
+        true
     }
 
     /// Refresh a session's git summary if stale. Cheap: `git status` is
@@ -1495,6 +1539,46 @@ mod tests {
         assert_eq!(runs[0].pid, 500);
         assert_eq!(runs[1].pid, 501);
         assert!(reg.command_runs("nope").is_err());
+    }
+
+    #[test]
+    fn note_resources_tracks_live_and_clears_on_exit() {
+        let (reg, ids) = reg_with(1, "");
+        let res = SessionResources {
+            cpu_pct: Some(12.5),
+            rss_bytes: Some(4096),
+            sampled_at: 111,
+        };
+        assert!(reg.note_resources(&ids[0], res));
+        let ev = reg.snapshot("C:/repo");
+        assert_eq!(ev.sessions[0].resources, Some(res));
+        // Identical re-sample is a no-op; unknown id is ignored.
+        assert!(!reg.note_resources(&ids[0], res));
+        assert!(!reg.note_resources("nope", res));
+        // Exit freezes live fields — the sample clears with them, and a
+        // dead session refuses further samples.
+        reg.note_exit(100, Some(0));
+        assert_eq!(reg.snapshot("C:/repo").sessions[0].resources, None);
+        assert!(!reg.note_resources(&ids[0], res));
+    }
+
+    #[test]
+    fn note_resources_does_not_bump_activity() {
+        // A sampled-but-quiet agent must not read "busy": the busy
+        // heuristic runs off last_activity_at, which sampling must not
+        // touch (only output/touch/children do).
+        let (reg, ids) = reg_with(1, "");
+        let before = reg.snapshot("C:/repo").sessions[0].last_activity_at;
+        assert!(reg.note_resources(
+            &ids[0],
+            SessionResources {
+                cpu_pct: Some(90.0),
+                rss_bytes: Some(1),
+                sampled_at: now_ms(),
+            },
+        ));
+        let after = reg.snapshot("C:/repo").sessions[0].last_activity_at;
+        assert_eq!(before, after);
     }
 
     #[test]
