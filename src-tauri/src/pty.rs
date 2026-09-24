@@ -42,7 +42,10 @@ fn validate_command_spec(program: &str, args: &[String]) -> AppResult<()> {
             "too many args ({MAX_COMMAND_ARGS} max)"
         )));
     }
-    if let Some(long) = args.iter().find(|a| a.chars().count() > MAX_COMMAND_ARG_LEN) {
+    if let Some(long) = args
+        .iter()
+        .find(|a| a.chars().count() > MAX_COMMAND_ARG_LEN)
+    {
         return Err(AppError::InvalidInput(format!(
             "arg too long ({MAX_COMMAND_ARG_LEN} chars max): {}…",
             long.chars().take(24).collect::<String>()
@@ -318,13 +321,16 @@ mod tests {
     #[test]
     fn command_spec_accepts_typical_argv() {
         assert!(validate_command_spec("codex", &[]).is_ok());
-        assert!(
-            validate_command_spec(
-                "claude",
-                &["--model".into(), "opus".into(), "-p".into(), "fix the tests".into()],
-            )
-            .is_ok()
-        );
+        assert!(validate_command_spec(
+            "claude",
+            &[
+                "--model".into(),
+                "opus".into(),
+                "-p".into(),
+                "fix the tests".into()
+            ],
+        )
+        .is_ok());
     }
 
     #[test]

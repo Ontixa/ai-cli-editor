@@ -155,11 +155,7 @@ fn truncate_string(s: &mut String) {
 /// format/version/exportedAt/workspaceRoot are written authoritatively.
 /// The receipt's session id must match the requested one — a receipt
 /// cannot be relabeled onto another session.
-fn finalize(
-    receipt: &mut SessionReceipt,
-    session_id: &str,
-    workspace_root: &str,
-) -> AppResult<()> {
+fn finalize(receipt: &mut SessionReceipt, session_id: &str, workspace_root: &str) -> AppResult<()> {
     if receipt.session.id != session_id {
         return Err(AppError::InvalidInput(
             "receipt does not match the session".into(),
@@ -219,11 +215,15 @@ pub fn write(
     path: &str,
     mut receipt: SessionReceipt,
 ) -> AppResult<ExportResult> {
-    finalize(&mut receipt, session_id, &paths::normalize(&root.to_string_lossy()))?;
+    finalize(
+        &mut receipt,
+        session_id,
+        &paths::normalize(&root.to_string_lossy()),
+    )?;
 
     let abs = paths::resolve_for_create(root, path)?;
-    let rel = paths::rel_of(root, &abs)
-        .ok_or_else(|| AppError::OutsideWorkspace(path.to_string()))?;
+    let rel =
+        paths::rel_of(root, &abs).ok_or_else(|| AppError::OutsideWorkspace(path.to_string()))?;
     if targets_git_internal(&rel) {
         return Err(AppError::InvalidInput(format!(
             "cannot write inside .git: {rel}"
