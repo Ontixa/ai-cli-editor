@@ -40,6 +40,7 @@
 | `lib/agents.ts`            | session display helpers: names, age, review labels, collision summaries                                     |
 | `lib/session-resources.ts` | process-tree CPU/RSS readout shaping: byte/percent formatting, staleness                                    |
 | `lib/session-export.ts`    | receipt shaping/capping + export-path validation (mirrors `export.rs`/`paths.rs`)                           |
+| `lib/terminal-labels.ts`   | syncs terminal-tab labels with the owning session's label (rename follows the tab)                          |
 | `lib/presets.ts`           | session-preset model: built-ins, draft validation/caps, sanitize, launch resolution, worktree naming        |
 | `lib/editor-manager.ts`    | CodeMirror state/view lifecycle outside React                                                               |
 | `lib/cm-theme.ts`          | editor + syntax theme                                                                                       |

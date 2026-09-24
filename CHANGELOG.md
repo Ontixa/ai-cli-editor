@@ -46,6 +46,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Renaming a session in the Agents cockpit now also renames the terminal
+  tab hosting that session's PTY — the tab previously kept the spawn-time
+  label, so the cockpit card and tab disagreed and the exit notice logged
+  the stale name. Sync runs on every `session:update`, covers background
+  project snapshots, and still applies to exited sessions while they
+  remain in history.
 - Windows command transport now bypasses `cmd.exe` only for the exact supported
   npm Node shim template, preserving literal arguments through native Node.
   Other `.cmd`/`.bat` launches use a restricted literal domain and reject

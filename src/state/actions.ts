@@ -27,6 +27,7 @@ import { checkForUpdate, downloadAndInstall, relaunchApp } from "../lib/update";
 import { isSourcePath } from "../lib/lang";
 import { parseWatchExcludes, sanitizeWatchExcludes } from "../lib/watch-excludes";
 import { buildSessionReceipt, exportSummary, normalizeExportPath } from "../lib/session-export";
+import { syncTerminalLabels } from "../lib/terminal-labels";
 import {
   MAX_USER_PRESETS,
   resolvePresetLaunch,
@@ -1315,8 +1316,16 @@ function applySessions(ev: {
   const s = store.get();
   // Usage is global (same payload on every event) — always updated,
   // even when the session list lands on a background project's snapshot.
+  // Terminal tabs follow the session label: a cockpit rename renames the
+  // tab that hosts the session's PTY (syncTerminalLabels is a no-op ref
+  // when nothing changed).
   if (ev.root === s.workspace?.root) {
-    store.set({ sessions: ev.sessions, collisions: ev.collisions, usage: ev.usage });
+    store.set({
+      sessions: ev.sessions,
+      collisions: ev.collisions,
+      usage: ev.usage,
+      terminals: syncTerminalLabels(s.terminals, ev.sessions),
+    });
     return;
   }
   const snap = s.projectData[ev.root];
@@ -1328,7 +1337,12 @@ function applySessions(ev: {
     usage: ev.usage,
     projectData: {
       ...s.projectData,
-      [ev.root]: { ...snap, sessions: ev.sessions, collisions: ev.collisions },
+      [ev.root]: {
+        ...snap,
+        sessions: ev.sessions,
+        collisions: ev.collisions,
+        terminals: syncTerminalLabels(snap.terminals, ev.sessions),
+      },
     },
   });
 }
