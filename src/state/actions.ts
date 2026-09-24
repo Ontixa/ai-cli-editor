@@ -26,6 +26,7 @@ import { ingestChanges, pushNotice } from "../lib/activity";
 import { checkForUpdate, downloadAndInstall, relaunchApp } from "../lib/update";
 import { isSourcePath } from "../lib/lang";
 import { parseWatchExcludes, sanitizeWatchExcludes } from "../lib/watch-excludes";
+import { formatSearchError } from "../lib/search";
 import { buildSessionReceipt, exportSummary, normalizeExportPath } from "../lib/session-export";
 import { syncTerminalLabels } from "../lib/terminal-labels";
 import {
@@ -307,7 +308,7 @@ function freshProjectFields(info: WorkspaceInfo): ProjectSnapshot {
     mergeReadiness: [],
     fileIndex: null,
     fileIndexTruncated: false,
-    search: { id: 0, query: "", matches: [], running: false, truncated: false },
+    search: { id: 0, query: "", matches: [], running: false, truncated: false, error: null },
     cursor: null,
   };
 }
@@ -551,7 +552,7 @@ export async function closeProject(root: string) {
       mergeReadiness: [],
       fileIndex: null,
       fileIndexTruncated: false,
-      search: { id: 0, query: "", matches: [], running: false, truncated: false },
+      search: { id: 0, query: "", matches: [], running: false, truncated: false, error: null },
       cursor: null,
       workspaceError: null,
     });
@@ -1259,18 +1260,44 @@ export function setPaletteOpen(open: boolean) {
 
 export async function runSearch(query: string, caseSensitive = false, regex = false) {
   const s = store.get();
-  if (!s.workspace || !query.trim()) return;
+  if (!s.workspace) return;
+  if (!query.trim()) {
+    // Cleared input: stop any in-flight scan and drop stale results so the
+    // panel can't show "N results" (or a stale error) under an empty query.
+    void api.searchCancel();
+    store.set({
+      search: {
+        ...s.search,
+        query: "",
+        matches: [],
+        running: false,
+        truncated: false,
+        error: null,
+      },
+    });
+    return;
+  }
   store.set({
     sidebarVisible: true,
     sidebarTab: "search",
     searchFocus: s.searchFocus + 1,
-    search: { ...s.search, query, matches: [], running: true, truncated: false },
+    search: { ...s.search, query, matches: [], running: true, truncated: false, error: null },
   });
   try {
     const id = await api.searchStart(query, caseSensitive, regex);
-    store.set({ search: { ...store.get().search, id } });
-  } catch {
-    store.set({ search: { ...store.get().search, running: false } });
+    // A newer runSearch may already have replaced this query — its own
+    // continuation owns the id then.
+    if (store.get().search.query === query) {
+      store.set({ search: { ...store.get().search, id } });
+    }
+  } catch (e) {
+    // Surface the failure (invalid regex, spawn error, …) — silently
+    // landing on "0 results" would claim the workspace has no matches.
+    if (store.get().search.query === query) {
+      store.set({
+        search: { ...store.get().search, running: false, error: formatSearchError(e) },
+      });
+    }
   }
 }
 
