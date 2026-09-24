@@ -14,7 +14,8 @@ layer. Local-first, vendor-neutral, no telemetry.
 - Tauri 2 + Rust backend, React 18 + TypeScript + Vite frontend
 - CodeMirror 6 (view/review-first editing), xterm.js + portable-pty (real PTY)
 - `notify` filesystem watcher, `ignore` crate for quick-open index
-- `git` binary for changes/diff, `rg` for workspace search (naive fallback)
+- `git` binary for changes/diff, `rg` for workspace search (embedded
+  `grep-regex`/`grep-searcher` fallback when `rg` isn't installed)
 - No heavy JS deps: hand-rolled store, fuzzy scorer, diff parser, link parser
 
 ## Repo layout
@@ -30,7 +31,7 @@ src-tauri/src/    Rust backend modules
   index.rs        quick-open file index (lazy, watcher-updated)
   pty.rs          session manager, reader threads, resize/kill
   git.rs          porcelain v2 parse, diff via git binary / similar
-  search.rs       rg --json streaming, fallback grep, cancel
+  search.rs       rg --null streaming, embedded grep-engine fallback, cancel
   platform.rs     shell selection, agent detection
   persist.rs      workspace state JSON in app data dir
 src/              React frontend

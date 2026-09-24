@@ -1,6 +1,8 @@
-//! Workspace text search. Prefers `rg` streamed line-by-line; falls back to a
-//! bounded in-process walk when ripgrep isn't installed. Only one search runs
-//! at a time — starting a new one cancels the previous.
+//! Workspace text search. Prefers `rg` streamed line-by-line; falls back to
+//! the embedded ripgrep engine (`grep-regex` + `grep-searcher`, the crates
+//! ripgrep itself is built on) over a bounded in-process walk when ripgrep
+//! isn't installed. Only one search runs at a time — starting a new one
+//! cancels the previous.
 
 use crate::error::{AppError, AppResult};
 use crate::excludes::IgnoreRules;
@@ -129,7 +131,11 @@ impl SearchRegistry {
         Ok(id)
     }
 
-    /// Fallback when rg is unavailable: bounded walk + substring scan.
+    /// Fallback when rg is unavailable: the embedded ripgrep engine
+    /// (`grep-regex` + `grep-searcher`) over the same bounded `ignore` walk.
+    /// Unlike a substring scan this honors regex queries, applies smart-case
+    /// like the rg path, decodes UTF-16 files, and stops at binary content —
+    /// so Windows installs without `rg.exe` keep the full search contract.
     fn start_fallback(
         &self,
         id: u64,
@@ -139,15 +145,23 @@ impl SearchRegistry {
         excludes: Arc<IgnoreRules>,
         emit: SearchEmit,
     ) -> AppResult<u64> {
+        let pattern = if opts.regex {
+            query.clone()
+        } else {
+            literal_pattern(&query)
+        };
+        let matcher = grep_regex::RegexMatcherBuilder::new()
+            .case_smart(!opts.case_sensitive)
+            .build(&pattern)
+            .map_err(|error| AppError::InvalidInput(format!("invalid search query: {error}")))?;
+
         thread::spawn(move || {
-            let needle = if opts.case_sensitive {
-                query.clone()
-            } else {
-                query.to_lowercase()
-            };
             let mut matches = Vec::new();
             let mut truncated = false;
             let mut last_flush = Instant::now();
+            let mut searcher = grep_searcher::SearcherBuilder::new()
+                .binary_detection(grep_searcher::BinaryDetection::quit(b'\x00'))
+                .build();
 
             let walk_root = root.clone();
             let walker = ignore::WalkBuilder::new(&root)
@@ -173,35 +187,19 @@ impl SearchRegistry {
                 if meta.len() > FALLBACK_MAX_FILE_BYTES {
                     continue;
                 }
-                let bytes = match std::fs::read(entry.path()) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                if bytes.iter().take(8192).any(|b| *b == 0) {
-                    continue; // skip binary
-                }
-                let text = String::from_utf8_lossy(&bytes);
                 let Some(rel) = paths::rel_of(&root, entry.path()) else {
                     continue;
                 };
-                for (i, line) in text.lines().enumerate() {
-                    let hay = if opts.case_sensitive {
-                        line.to_string()
-                    } else {
-                        line.to_lowercase()
-                    };
-                    if let Some(col) = hay.find(&needle) {
-                        matches.push(SearchMatch {
-                            path: rel.clone(),
-                            line: i as u32 + 1,
-                            col: col as u32 + 1,
-                            text: line.trim_end().chars().take(400).collect(),
-                        });
-                        if matches.len() >= MAX_MATCHES {
-                            truncated = true;
-                            break 'outer;
-                        }
-                    }
+                let mut sink = CollectSink {
+                    rel: &rel,
+                    matcher: &matcher,
+                    matches: &mut matches,
+                };
+                // Unreadable or unsearchable files are skipped, as before.
+                let _ = searcher.search_path(&matcher, entry.path(), &mut sink);
+                if matches.len() >= MAX_MATCHES {
+                    truncated = true;
+                    break 'outer;
                 }
                 if last_flush.elapsed() > Duration::from_millis(CHUNK_FLUSH_MS)
                     && !matches.is_empty()
@@ -220,6 +218,59 @@ impl SearchRegistry {
         });
         Ok(id)
     }
+}
+
+/// `grep_searcher::Sink` collecting one `SearchMatch` per matched line.
+struct CollectSink<'a> {
+    rel: &'a str,
+    matcher: &'a grep_regex::RegexMatcher,
+    matches: &'a mut Vec<SearchMatch>,
+}
+
+impl grep_searcher::Sink for CollectSink<'_> {
+    type Error = std::io::Error;
+
+    fn matched(
+        &mut self,
+        _searcher: &grep_searcher::Searcher,
+        mat: &grep_searcher::SinkMatch<'_>,
+    ) -> Result<bool, Self::Error> {
+        use grep_matcher::Matcher;
+        let bytes = mat.bytes();
+        // Column of the first match inside the line, mirroring rg's
+        // 1-based byte `--column` output.
+        let col = self
+            .matcher
+            .find_at(bytes, 0)
+            .ok()
+            .flatten()
+            .map(|m| m.start())
+            .unwrap_or(0);
+        self.matches.push(SearchMatch {
+            path: self.rel.to_string(),
+            line: mat.line_number().unwrap_or(0) as u32,
+            col: col as u32 + 1,
+            text: String::from_utf8_lossy(bytes)
+                .trim_end()
+                .chars()
+                .take(400)
+                .collect(),
+        });
+        Ok(self.matches.len() < MAX_MATCHES)
+    }
+}
+
+/// Escape a fixed-strings query so `grep-regex` treats it literally —
+/// the equivalent of rg's `--fixed-strings`.
+fn literal_pattern(query: &str) -> String {
+    let mut escaped = String::with_capacity(query.len() + query.len() / 2);
+    for ch in query.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn rg_bin() -> &'static str {
@@ -330,5 +381,166 @@ mod tests {
     #[test]
     fn parse_rg_garbage() {
         assert!(parse_rg_record(b"no-nul-here").is_none());
+    }
+
+    #[test]
+    fn literal_pattern_escapes_regex_metacharacters() {
+        assert_eq!(literal_pattern("plain"), "plain");
+        assert_eq!(literal_pattern("a.b"), "a\\.b");
+        assert_eq!(literal_pattern("fn(x)+$"), "fn\\(x\\)\\+\\$");
+        // An escaped metachar query matches literally, not as a regex.
+        let matcher = grep_regex::RegexMatcherBuilder::new()
+            .build(&literal_pattern("a.c"))
+            .unwrap();
+        use grep_matcher::Matcher;
+        assert!(matcher.find(b"a.c").unwrap().is_some());
+        assert!(matcher.find(b"abc").unwrap().is_none());
+    }
+
+    #[test]
+    fn fallback_rejects_an_invalid_regex() {
+        let registry = SearchRegistry::new();
+        let emit: SearchEmit = Arc::new(|_, _| {});
+        let err = registry
+            .start_fallback(
+                1,
+                std::env::temp_dir(),
+                "(".to_string(),
+                SearchOpts {
+                    case_sensitive: true,
+                    regex: true,
+                },
+                Arc::new(IgnoreRules::new()),
+                emit,
+            )
+            .unwrap_err();
+        assert!(matches!(err, AppError::InvalidInput(_)));
+    }
+
+    /// Run the embedded fallback to completion and return its matches plus
+    /// the `truncated` flag from the `done` event.
+    fn run_fallback(root: PathBuf, query: &str, opts: SearchOpts) -> (Vec<SearchMatch>, bool) {
+        let registry = SearchRegistry::new();
+        let chunks: Arc<Mutex<Vec<SearchMatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let done: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let emit: SearchEmit = {
+            let chunks = chunks.clone();
+            let done = done.clone();
+            Arc::new(move |kind, payload| match kind {
+                "chunk" => {
+                    if let Some(list) = payload["matches"].as_array() {
+                        for m in list {
+                            chunks.lock().unwrap().push(SearchMatch {
+                                path: m["path"].as_str().unwrap_or("").to_string(),
+                                line: m["line"].as_u64().unwrap_or(0) as u32,
+                                col: m["col"].as_u64().unwrap_or(0) as u32,
+                                text: m["text"].as_str().unwrap_or("").to_string(),
+                            });
+                        }
+                    }
+                }
+                "done" => {
+                    *done.lock().unwrap() = Some(payload["truncated"].as_bool().unwrap_or(false));
+                }
+                _ => {}
+            })
+        };
+        registry
+            .start_fallback(
+                7,
+                root,
+                query.to_string(),
+                opts,
+                Arc::new(IgnoreRules::new()),
+                emit,
+            )
+            .unwrap();
+        for _ in 0..500 {
+            if done.lock().unwrap().is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let truncated = done
+            .lock()
+            .unwrap()
+            .expect("fallback search did not finish in 5s");
+        let matches = std::mem::take(&mut *chunks.lock().unwrap());
+        (matches, truncated)
+    }
+
+    fn temp_workspace(files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aice-search-test-{}-{}",
+            std::process::id(),
+            files.len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (rel, content) in files {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn fallback_finds_literal_and_regex_matches() {
+        let root = temp_workspace(&[
+            ("src/main.rs", "fn main() {}\nlet value = 42;\n"),
+            ("src/lib.rs", "pub fn helper() {}\n"),
+        ]);
+        let (matches, truncated) = run_fallback(
+            root.clone(),
+            "fn ",
+            SearchOpts {
+                case_sensitive: true,
+                regex: false,
+            },
+        );
+        assert!(!truncated);
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().all(|m| m.text.contains("fn ")));
+        assert!(matches.iter().any(|m| m.path.ends_with("main.rs")));
+        assert!(matches.iter().any(|m| m.path.ends_with("lib.rs")));
+        assert!(matches.iter().all(|m| m.line == 1));
+
+        let (regex_matches, _) = run_fallback(
+            root.clone(),
+            r"value = \d+",
+            SearchOpts {
+                case_sensitive: true,
+                regex: true,
+            },
+        );
+        assert_eq!(regex_matches.len(), 1);
+        assert_eq!(regex_matches[0].line, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fallback_smart_case_and_literal_metachars() {
+        let root = temp_workspace(&[("a.txt", "Error one\nerror two\n")]);
+        // Smart case: all-lowercase query matches both spellings.
+        let (matches, _) = run_fallback(
+            root.clone(),
+            "error",
+            SearchOpts {
+                case_sensitive: false,
+                regex: false,
+            },
+        );
+        assert_eq!(matches.len(), 2);
+        // Literal mode: "e.ror" does not regex-match "Error/error".
+        let (literal, _) = run_fallback(
+            root.clone(),
+            "e.ror",
+            SearchOpts {
+                case_sensitive: true,
+                regex: false,
+            },
+        );
+        assert!(literal.is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
