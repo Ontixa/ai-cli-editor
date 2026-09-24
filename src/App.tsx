@@ -20,6 +20,7 @@ import { CommandPalette } from "./components/overlays/CommandPalette";
 import { ConfirmModal } from "./components/overlays/ConfirmModal";
 import { ExcludesDialog } from "./components/overlays/ExcludesDialog";
 import { ExportSessionDialog } from "./components/overlays/ExportSessionDialog";
+import { SessionPresetDialog } from "./components/overlays/SessionPresetDialog";
 import { Splitter } from "./components/Splitter";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
@@ -88,6 +89,7 @@ export default function App() {
       <ConfirmModal />
       <ExcludesDialog />
       <ExportSessionDialog />
+      <SessionPresetDialog />
     </div>
   );
 }

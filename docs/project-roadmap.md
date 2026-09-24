@@ -51,11 +51,16 @@
   live-only `SessionResources` sample on `session:update`; cockpit cards
   show a compact `cpu x% · y MB` readout that renders "—" per
   unobtainable metric and greys when the sample goes stale
+- **Session presets** — named launch recipes (agent CLI / custom command /
+  shell + argv + cwd mode) launched through the existing
+  `worktree_create` + `pty_spawn` paths; three built-ins ("Isolated agent —
+  new worktree", "In-place agent session", "Shell — new worktree") plus
+  bounded user presets persisted in `workspace-state.json`
+  (`lib/presets.ts`, SessionPresetDialog, palette + Agents cockpit)
 
 ## Next
 
 - Bundled/embedded ripgrep for Windows installs without it
-- Session templates / one-click "new isolated agent" presets
 
 ## Explicit non-goals
 

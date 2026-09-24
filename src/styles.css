@@ -1565,6 +1565,46 @@ kbd {
   font-size: 10.5px;
 }
 
+/* ============ session presets ============ */
+.preset-dialog {
+  width: 460px;
+}
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 264px;
+  overflow-y: auto;
+  margin: 2px 0 8px;
+  outline: none;
+}
+.preset-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  padding: 8px 10px;
+  cursor: pointer;
+  transition:
+    background 0.08s var(--ease),
+    border-color 0.08s var(--ease);
+}
+.preset-row:hover {
+  background: var(--bg-hover);
+}
+.preset-row.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+.preset-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.preset-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+
 /* ============ welcome / misc ============ */
 .welcome {
   flex: 1;

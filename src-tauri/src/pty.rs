@@ -18,6 +18,44 @@ use std::time::Duration;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Bounds for externally supplied command specs. The frontend can queue
+/// arbitrary argv (terminal launches, session presets, future callers),
+/// so cap it before a PTY is ever opened. Generous enough for real agent
+/// CLIs, bounded enough to keep junk out of sessions.json / the registry.
+pub const MAX_COMMAND_ARGS: usize = 64;
+pub const MAX_COMMAND_ARG_LEN: usize = 4 * 1024;
+pub const MAX_PROGRAM_LEN: usize = 512;
+/// Session labels get the same bound as `session_rename` (chars).
+pub const MAX_LABEL_LEN: usize = 80;
+
+fn validate_command_spec(program: &str, args: &[String]) -> AppResult<()> {
+    if program.trim().is_empty() {
+        return Err(AppError::InvalidInput("empty program".into()));
+    }
+    if program.chars().count() > MAX_PROGRAM_LEN {
+        return Err(AppError::InvalidInput(format!(
+            "program too long ({MAX_PROGRAM_LEN} chars max)"
+        )));
+    }
+    if args.len() > MAX_COMMAND_ARGS {
+        return Err(AppError::InvalidInput(format!(
+            "too many args ({MAX_COMMAND_ARGS} max)"
+        )));
+    }
+    if let Some(long) = args.iter().find(|a| a.chars().count() > MAX_COMMAND_ARG_LEN) {
+        return Err(AppError::InvalidInput(format!(
+            "arg too long ({MAX_COMMAND_ARG_LEN} chars max): {}…",
+            long.chars().take(24).collect::<String>()
+        )));
+    }
+    Ok(())
+}
+
+/// Bound a session label the way `session_rename` does — chars, not bytes.
+fn bounded_label(label: &str) -> String {
+    label.chars().take(MAX_LABEL_LEN).collect()
+}
+
 /// Event forwarder: `(session_id, kind, payload)` where kind is "out"|"exit".
 pub type PtyEmit = Arc<dyn Fn(u64, &str, serde_json::Value) + Send + Sync>;
 
@@ -52,9 +90,11 @@ impl PtyRegistry {
     /// `emit` receives `(event_suffix, payload_json)` pairs to forward:
     ///   ("out",  base64 bytes), ("exit", {"id":..,"code":..})
     pub fn spawn(&self, spec: SpawnSpec, emit: PtyEmit) -> AppResult<PtyInfo> {
-        // Validate command transport before opening a PTY or creating a child.
+        // Validate argv + command transport before opening a PTY or
+        // creating a child.
         let prepared = match &spec {
             SpawnSpec::Command { program, args, .. } => {
+                validate_command_spec(program, args)?;
                 Some(crate::platform::wrap_for_spawn(program, args)?)
             }
             SpawnSpec::Shell { .. } => None,
@@ -100,7 +140,7 @@ impl PtyRegistry {
         drop(pair.slave); // releasing the slave lets EOF propagate on exit
         let pid = child.process_id();
 
-        let label = spec.label();
+        let label = bounded_label(&spec.label());
         let master = pair.master;
         let mut reader = master
             .try_clone_reader()
@@ -268,5 +308,53 @@ impl SpawnSpec {
             SpawnSpec::Shell { shell, .. } => shell.label.clone(),
             SpawnSpec::Command { label, .. } => label.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_spec_accepts_typical_argv() {
+        assert!(validate_command_spec("codex", &[]).is_ok());
+        assert!(
+            validate_command_spec(
+                "claude",
+                &["--model".into(), "opus".into(), "-p".into(), "fix the tests".into()],
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn command_spec_rejects_empty_or_overlong_program() {
+        assert!(validate_command_spec("", &[]).is_err());
+        assert!(validate_command_spec("   ", &[]).is_err());
+        assert!(validate_command_spec(&"p".repeat(MAX_PROGRAM_LEN + 1), &[]).is_err());
+        assert!(validate_command_spec(&"p".repeat(MAX_PROGRAM_LEN), &[]).is_ok());
+    }
+
+    #[test]
+    fn command_spec_rejects_unbounded_argv() {
+        let many: Vec<String> = (0..=MAX_COMMAND_ARGS).map(|i| i.to_string()).collect();
+        assert!(validate_command_spec("t", &many).is_err());
+        let at_cap: Vec<String> = (0..MAX_COMMAND_ARGS).map(|i| i.to_string()).collect();
+        assert!(validate_command_spec("t", &at_cap).is_ok());
+
+        let long_arg = vec!["x".repeat(MAX_COMMAND_ARG_LEN + 1)];
+        assert!(validate_command_spec("t", &long_arg).is_err());
+        let at_cap = vec!["x".repeat(MAX_COMMAND_ARG_LEN)];
+        assert!(validate_command_spec("t", &at_cap).is_ok());
+    }
+
+    #[test]
+    fn labels_are_bounded_in_chars() {
+        assert_eq!(bounded_label("short"), "short");
+        let long = "界".repeat(MAX_LABEL_LEN + 10);
+        let out = bounded_label(&long);
+        assert_eq!(out.chars().count(), MAX_LABEL_LEN);
+        // Unicode boundary safety — no partial chars.
+        assert_eq!(out, "界".repeat(MAX_LABEL_LEN));
     }
 }
