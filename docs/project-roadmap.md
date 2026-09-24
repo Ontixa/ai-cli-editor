@@ -46,12 +46,16 @@
   touched files and command runs, git + usage summaries) to a
   workspace-contained path — metadata only, never terminal output or
   file contents. Palette command + per-session card action
+- **Resource usage display** — the procmon poll also sums CPU% (of total
+  machine capacity) and RSS over each session's process tree into a
+  live-only `SessionResources` sample on `session:update`; cockpit cards
+  show a compact `cpu x% · y MB` readout that renders "—" per
+  unobtainable metric and greys when the sample goes stale
 
 ## Next
 
 - Bundled/embedded ripgrep for Windows installs without it
 - Session templates / one-click "new isolated agent" presets
-- Resource usage display in the cockpit
 
 ## Explicit non-goals
 

@@ -107,6 +107,18 @@ export interface SessionGit {
   staged: number;
 }
 
+/** One procmon resource sample for a session's whole process tree.
+ *  Live-only — dead sessions ship `null`. A metric is null when the OS
+ *  wouldn't share it: render "—", never a fabricated zero. */
+export interface SessionResources {
+  /** Tree CPU as % of total machine capacity (all cores = 100%). */
+  cpuPct?: number | null;
+  /** Resident memory summed over the tree, in bytes. */
+  rssBytes?: number | null;
+  /** ms epoch when sampled — staleness marker for the readout. */
+  sampledAt: number;
+}
+
 export interface AgentSession {
   id: string;
   ptyId?: number | null;
@@ -128,6 +140,8 @@ export interface AgentSession {
   commands: CommandRun[];
   children: ChildProc[];
   git?: SessionGit | null;
+  /** Latest procmon sample for the process tree (live sessions only). */
+  resources?: SessionResources | null;
   /** Token usage the CLI reported on its output (backend meter.rs). */
   tokensIn: number;
   tokensOut: number;

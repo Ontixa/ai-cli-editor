@@ -1217,6 +1217,16 @@ kbd {
   color: var(--yellow);
   border-color: rgba(227, 179, 65, 0.5);
 }
+.sess-tag.res {
+  color: var(--purple);
+  border-color: rgba(210, 168, 255, 0.35);
+  font-family: var(--font-mono);
+}
+.sess-tag.res.stale {
+  color: var(--fg-faint);
+  border-style: dashed;
+  border-color: var(--border);
+}
 .usage-total {
   font-size: 10.5px;
   color: var(--accent);
