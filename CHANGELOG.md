@@ -8,6 +8,18 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Session presets**: named, reusable launch recipes — a detected agent
+  CLI, custom command, or interactive shell plus argv and a cwd mode
+  (workspace root or a fresh `.worktrees/<name>` checkout). Launching a
+  preset goes through the existing `worktree_create` + `pty_spawn` paths;
+  nothing runs outside the normal terminal/session machinery. Ships with
+  "Isolated agent — new worktree", "In-place agent session", and "Shell —
+  new worktree"; user-defined presets persist in `workspace-state.json`
+  with bounded counts/lengths, and `pty_spawn` now bounds command argv
+  (≤64 args, ≤4 KiB each, ≤512-char program, 80-char labels). Entry
+  points: palette ("New Agent Session from Preset…", plus one-click
+  isolated/in-place agent commands) and a "+ preset…" button in the Agents
+  cockpit.
 - **Merge-readiness summary**: each agent worktree row in the Agents
   cockpit now reports commits ahead/behind the base branch, uncommitted
   and untracked file counts, a read-only clean-merge verdict from

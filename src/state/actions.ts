@@ -27,6 +27,19 @@ import { checkForUpdate, downloadAndInstall, relaunchApp } from "../lib/update";
 import { isSourcePath } from "../lib/lang";
 import { parseWatchExcludes, sanitizeWatchExcludes } from "../lib/watch-excludes";
 import { buildSessionReceipt, exportSummary, normalizeExportPath } from "../lib/session-export";
+import {
+  MAX_USER_PRESETS,
+  resolvePresetLaunch,
+  sanitizeUserPresets,
+  toPreset,
+  uniqueWorktreeName,
+  userPresetId,
+  validatePresetDraft,
+  worktreeBaseSlug,
+  presetSessionLabel,
+  type PresetDraft,
+  type SessionPreset,
+} from "../lib/presets";
 import type {
   AgentInfo,
   AgentSession,
@@ -75,6 +88,7 @@ function persistNow() {
     diffMode: s.diffMode,
     theme: s.theme,
     watchExcludes: s.watchExcludes,
+    sessionPresets: s.sessionPresets,
     recentFiles: s.recentFiles.slice(0, 20),
     recentProjects: s.recentProjects.slice(0, 12),
   });
@@ -129,6 +143,7 @@ function restoreGlobalPrefs(restored: Record<string, unknown>) {
     diffMode: restored.diffMode === "unified" ? "unified" : "split",
     theme: restored.theme === "light" ? "light" : "dark",
     watchExcludes: sanitizeWatchExcludes(restored.watchExcludes),
+    sessionPresets: sanitizeUserPresets(restored.sessionPresets),
     recentFiles: Array.isArray(restored.recentFiles)
       ? (restored.recentFiles as string[]).filter((x) => typeof x === "string")
       : [],
@@ -1399,6 +1414,93 @@ export async function exportSession(sessionId: string, path: string): Promise<st
   } catch (e) {
     return String(e);
   }
+}
+
+// ---------- session presets ----------
+
+/** Open the preset launcher (optionally preselecting a preset — the
+ *  palette uses this for one-click built-ins). */
+export function openPresetDialog(presetId?: string) {
+  if (!store.get().workspace) return;
+  store.set({ presetDialog: { presetId: presetId ?? null } });
+  markUserAction();
+}
+
+export function closePresetDialog() {
+  store.set({ presetDialog: null });
+}
+
+/**
+ * Launch a preset through the existing provisioning paths — no parallel
+ * machinery: `worktree_create` for worktree-mode presets, then a normal
+ * terminal whose PTY spawns via `pty_spawn`. Returns an error string, or
+ * null on success.
+ */
+export async function launchPreset(
+  preset: SessionPreset,
+  agentId?: string,
+): Promise<string | null> {
+  const s = store.get();
+  if (!s.workspace) return "no workspace is open";
+  const res = resolvePresetLaunch(preset, s.agents, agentId);
+  if (res.needsAgent) return "pick an agent CLI first";
+  try {
+    if (preset.cwdMode === "worktree") {
+      const name = uniqueWorktreeName(
+        worktreeBaseSlug(res),
+        s.worktrees.map((w) => w.path),
+      );
+      const wt = await api.worktreeCreate(name);
+      await refreshWorktrees();
+      newTerminal({
+        cwd: wt.path,
+        program: res.program,
+        args: res.args,
+        label: presetSessionLabel(res, name),
+      });
+    } else {
+      newTerminal({
+        program: res.program,
+        args: res.args,
+        label: presetSessionLabel(res),
+      });
+    }
+    store.set({
+      activity: pushNotice(store.get().activity, "terminal", `preset: ${preset.name}`),
+    });
+    return null;
+  } catch (e) {
+    return String(e);
+  }
+}
+
+/**
+ * Validate + store a user preset (create when `editingId` is unset, else
+ * replace in place). Returns an error string, or null on success.
+ * Persisted via workspace-state.json like the other UI preferences.
+ */
+export function saveUserPreset(draft: PresetDraft, editingId?: string): string | null {
+  const errors = validatePresetDraft(draft);
+  if (errors.length) return errors.join("\n");
+  const s = store.get();
+  const others = s.sessionPresets.filter((p) => p.id !== editingId);
+  if (others.length >= MAX_USER_PRESETS) return `at most ${MAX_USER_PRESETS} presets`;
+  const id =
+    editingId ??
+    userPresetId(
+      draft.name,
+      others.map((p) => p.id),
+    );
+  store.set({ sessionPresets: [...others, toPreset(draft, id)] });
+  markUserAction();
+  schedulePersist();
+  return null;
+}
+
+export function deleteUserPreset(id: string) {
+  store.set({ sessionPresets: store.get().sessionPresets.filter((p) => p.id !== id) });
+  markUserAction();
+  schedulePersist();
 }
 
 // ---------- worktrees ----------

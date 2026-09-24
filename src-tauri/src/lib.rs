@@ -589,6 +589,9 @@ fn pty_spawn(
                 .unwrap_or_else(|| platform::default_shell().label),
         )
     };
+    // Bound the label the same way PtyRegistry::spawn does (chars, not
+    // bytes) so the session registry and PtyInfo stay identical.
+    let label: String = label.chars().take(pty::MAX_LABEL_LEN).collect();
     let spec = match &program {
         Some(p) => pty::SpawnSpec::Command {
             label: label.clone(),

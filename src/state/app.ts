@@ -1,5 +1,6 @@
 import { Store } from "../lib/store";
 import type { ActivityItem } from "../lib/activity";
+import type { SessionPreset } from "../lib/presets";
 import type {
   AgentInfo,
   AgentSession,
@@ -207,6 +208,12 @@ export interface AppState {
   /** Session-export dialog request: null = closed; `sessionId` null lets
    *  the dialog pick the most recently active session. */
   exportDialog: { sessionId: string | null } | null;
+  /** Session-preset launcher/editor dialog; null = closed. `presetId`
+   *  preselects a preset (e.g. a palette shortcut for a built-in). */
+  presetDialog: { presetId: string | null } | null;
+  /** User-defined session presets (built-ins ship in lib/presets.ts).
+   *  Global preference — persisted in workspace-state.json. */
+  sessionPresets: SessionPreset[];
   search: SearchUiState;
   recentFiles: string[];
   /** Recently opened project roots, most-recent-first (welcome screen). */
@@ -283,6 +290,8 @@ export const initialState: AppState = {
   paletteOpen: false,
   excludesOpen: false,
   exportDialog: null,
+  presetDialog: null,
+  sessionPresets: [],
   search: { id: 0, query: "", matches: [], running: false, truncated: false },
   recentFiles: [],
   recentProjects: [],

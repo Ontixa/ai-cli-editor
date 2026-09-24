@@ -11,6 +11,7 @@ import {
   deleteCheckpoint,
   checkpointPlan,
   openSessionExport,
+  openPresetDialog,
   markUserAction,
 } from "../../state/actions";
 import {
@@ -498,6 +499,13 @@ export function Agents() {
           </span>
         )}
         <span className="spacer" />
+        <button
+          className="mini-btn"
+          title="Launch a session preset (built-in or custom)"
+          onClick={() => openPresetDialog()}
+        >
+          + preset…
+        </button>
         {isRepo && (
           <button className="mini-btn primary" onClick={() => setCreating((x) => !x)}>
             + isolated agent

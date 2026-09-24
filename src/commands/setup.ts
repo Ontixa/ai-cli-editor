@@ -81,6 +81,27 @@ export function registerCommands() {
       run: () => A.openSessionExport(),
     },
     {
+      id: "session.newFromPreset",
+      title: "New Agent Session from Preset…",
+      category: "Session",
+      when: hasWorkspace,
+      run: () => A.openPresetDialog(),
+    },
+    {
+      id: "session.newIsolatedAgent",
+      title: "New Isolated Agent (New Worktree)",
+      category: "Session",
+      when: () => hasWorkspace() && store.get().git.isRepo,
+      run: () => A.openPresetDialog("builtin:isolated-agent"),
+    },
+    {
+      id: "session.newInPlaceAgent",
+      title: "New In-Place Agent Session",
+      category: "Session",
+      when: hasWorkspace,
+      run: () => A.openPresetDialog("builtin:inplace-agent"),
+    },
+    {
       id: "sidebar.files",
       title: "Show Files",
       category: "View",

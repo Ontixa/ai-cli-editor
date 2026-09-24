@@ -40,6 +40,7 @@
 | `lib/agents.ts`            | session display helpers: names, age, review labels, collision summaries                                     |
 | `lib/session-resources.ts` | process-tree CPU/RSS readout shaping: byte/percent formatting, staleness                                    |
 | `lib/session-export.ts`    | receipt shaping/capping + export-path validation (mirrors `export.rs`/`paths.rs`)                           |
+| `lib/presets.ts`           | session-preset model: built-ins, draft validation/caps, sanitize, launch resolution, worktree naming        |
 | `lib/editor-manager.ts`    | CodeMirror state/view lifecycle outside React                                                               |
 | `lib/cm-theme.ts`          | editor + syntax theme                                                                                       |
 | `state/app.ts`             | `AppState` shape + store instance                                                                           |
@@ -65,3 +66,6 @@
   conflicts via `checkpoint_plan` before `checkpoint_restore` applies.
 - **Isolated agent** → `worktree_create` makes `.worktrees/<name>` on
   `agent/<name>` → `newTerminal({ cwd })` spawns the agent inside it.
+- **Session preset** → resolve target (detected agent / program / shell) →
+  `worktree_create` when `cwdMode: "worktree"` → `newTerminal` → `pty_spawn`
+  (argv bounded backend-side).
