@@ -491,7 +491,10 @@ export function requestCloseProject(root: string) {
 /** Save dirty docs of a project (activating it first if needed). */
 async function saveDocsThen(root: string, paths: string[], then: () => void) {
   if (store.get().workspace?.root !== root) await activateProject(root);
-  for (const p of paths) await saveFile(p);
+  for (const p of paths) {
+    if (wsRoot() !== root || !(await saveFile(p))) return;
+  }
+  if (wsRoot() !== root || dirtyPathsIn(root).length) return;
   then();
 }
 
@@ -710,6 +713,7 @@ export function requestCloseTabs(keys: string[]) {
         kind: "primary",
         onPick: () =>
           void saveThenClose(
+            s.workspace?.root ?? "",
             keys,
             dirty.map((t) => t.path),
           ),
@@ -718,8 +722,16 @@ export function requestCloseTabs(keys: string[]) {
   });
 }
 
-async function saveThenClose(keys: string[], dirtyPaths: string[]) {
-  for (const p of dirtyPaths) await saveFile(p);
+async function saveThenClose(root: string, keys: string[], dirtyPaths: string[]) {
+  for (const p of dirtyPaths) {
+    if (wsRoot() !== root || !(await saveFile(p))) return;
+  }
+  const s = store.get();
+  if (
+    wsRoot() !== root ||
+    s.tabs.some((t) => keys.includes(t.key) && t.kind === "file" && s.docs[t.path]?.dirty)
+  )
+    return;
   closeTabsNow(keys);
 }
 
@@ -759,29 +771,40 @@ export function markDocDirty(path: string, dirty: boolean) {
   store.set({ docs: { ...store.get().docs, [path]: { ...d, dirty } } });
 }
 
-export async function saveFile(path?: string) {
+/** True only when the current buffer was saved and is safe to close. */
+export async function saveFile(path?: string): Promise<boolean> {
   const s = store.get();
   const root = s.workspace?.root;
   const p = path ?? activeFilePath();
-  if (!p || !root) return;
+  if (!p || !root) return false;
   const text = editorManager.getText(root, p);
-  if (text === null) return;
+  if (text === null) return false;
   const doc = s.docs[p];
-  if (doc && !doc.editable && !doc.dirty) return;
+  if (doc && !doc.editable && !doc.dirty) return true;
   editorManager.markSelfWrite(root, p);
   try {
     const res = await api.writeFile(p, text);
+    // A project switch or a newer edit must not let Save & Close discard
+    // a buffer that this write did not save.
+    if (wsRoot() !== root) return false;
     const d = store.get().docs[p];
+    const dirty = editorManager.getText(root, p) !== text;
     if (d) {
       store.set({
         docs: {
           ...store.get().docs,
-          [p]: { ...d, dirty: false, conflict: false, mtimeMs: res.mtimeMs },
+          [p]: { ...d, dirty, conflict: false, mtimeMs: res.mtimeMs },
         },
       });
     }
+    return !!d && !dirty;
   } catch (e) {
-    console.error("save failed", e);
+    askConfirm({
+      title: `Could not save ${p}`,
+      message: `Your changes are still open. ${String(e)}`,
+      buttons: [{ label: "OK", kind: "primary" }],
+    });
+    return false;
   }
 }
 

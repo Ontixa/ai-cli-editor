@@ -154,7 +154,9 @@ export function registerCommands() {
       category: "File",
       shortcut: "Mod+S",
       when: hasFile,
-      run: () => A.saveFile(),
+      run: async () => {
+        await A.saveFile();
+      },
     },
     {
       id: "file.reload",
