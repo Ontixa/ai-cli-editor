@@ -9,9 +9,9 @@ use crate::excludes::IgnoreRules;
 use crate::paths;
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,9 +35,32 @@ pub struct SearchOpts {
     pub regex: bool,
 }
 
+#[derive(Clone)]
+struct SearchRun {
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl SearchRun {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+struct ActiveSearch {
+    run: SearchRun,
+    child: Option<Child>,
+}
+
+type ActiveSlot = Arc<Mutex<Option<ActiveSearch>>>;
+
 #[derive(Default)]
 pub struct SearchRegistry {
-    active: Arc<Mutex<Option<Child>>>,
+    active: ActiveSlot,
     generation: AtomicU64,
 }
 
@@ -49,8 +72,47 @@ impl SearchRegistry {
     }
 
     pub fn cancel(&self) {
-        if let Some(mut child) = self.active.lock().unwrap().take() {
-            let _ = child.kill();
+        let previous = {
+            let mut active = self.active.lock().unwrap();
+            let previous = active.take();
+            if let Some(previous) = &previous {
+                previous.run.cancel();
+            }
+            previous
+        };
+        stop_search(previous);
+    }
+
+    /// Reserve an id and replace the active run in one critical section.
+    /// A slower concurrent start must never overwrite a newer child handle.
+    fn begin(&self) -> SearchRun {
+        let (run, previous) = {
+            let mut active = self.active.lock().unwrap();
+            let run = SearchRun {
+                id: self.generation.fetch_add(1, Ordering::Relaxed) + 1,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            if let Some(previous) = active.as_ref() {
+                previous.run.cancel();
+            }
+            let previous = active.replace(ActiveSearch {
+                run: run.clone(),
+                child: None,
+            });
+            (run, previous)
+        };
+        stop_search(previous);
+        run
+    }
+
+    fn register_child(&self, run: &SearchRun, child: Child) -> Result<(), Child> {
+        let mut active = self.active.lock().unwrap();
+        match active.as_mut() {
+            Some(active) if active.run.id == run.id && !run.is_cancelled() => {
+                active.child = Some(child);
+                Ok(())
+            }
+            _ => Err(child),
         }
     }
 
@@ -69,31 +131,34 @@ impl SearchRegistry {
         if query.trim().is_empty() {
             return Err(AppError::InvalidInput("empty query".into()));
         }
-        self.cancel();
+        let run = self.begin();
         // Reject an unparseable pattern up front so the command fails
-        // identically under both engines — in the rg path the parse error
-        // would otherwise die on a worker thread and surface as a silent
-        // empty result set. The fallback still builds its own matcher.
+        // identically under both engines instead of silently finishing.
         if opts.regex {
-            grep_regex::RegexMatcherBuilder::new()
+            if let Err(error) = grep_regex::RegexMatcherBuilder::new()
                 .case_smart(!opts.case_sensitive)
                 .build(&query)
-                .map_err(|error| {
-                    AppError::InvalidInput(format!("invalid search query: {error}"))
-                })?;
+            {
+                finish_search(&self.active, run.id);
+                return Err(AppError::InvalidInput(format!(
+                    "invalid search query: {error}"
+                )));
+            }
         }
-        let id = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-
-        if crate::platform::find_on_path(rg_bin()).is_some() {
-            self.start_rg(id, root, query, opts, emit)
+        let result = if crate::platform::find_on_path(rg_bin()).is_some() {
+            self.start_rg(run.clone(), root, query, opts, emit)
         } else {
-            self.start_fallback(id, root, query, opts, excludes, emit)
+            self.start_fallback(run.clone(), root, query, opts, excludes, emit)
+        };
+        if result.is_err() {
+            finish_search(&self.active, run.id);
         }
+        result
     }
 
     fn start_rg(
         &self,
-        id: u64,
+        run: SearchRun,
         root: PathBuf,
         query: String,
         opts: SearchOpts,
@@ -121,6 +186,9 @@ impl SearchRegistry {
         args.push("--".into());
         args.push(query);
 
+        if run.is_cancelled() {
+            return Ok(run.id);
+        }
         let mut child = Command::new(rg_bin())
             .args(&args)
             .current_dir(&root)
@@ -131,14 +199,19 @@ impl SearchRegistry {
             .map_err(|e| AppError::Internal(format!("failed to spawn rg: {e}")))?;
 
         let stdout = child.stdout.take().unwrap();
-        *self.active.lock().unwrap() = Some(child);
+        if let Err(mut child) = self.register_child(&run, child) {
+            // Cancellation/replacement may happen while spawn is running.
+            stop_child(&mut child);
+            return Ok(run.id);
+        }
 
+        let id = run.id;
         let active = self.active.clone();
         thread::spawn(move || {
-            stream_reader(id, stdout, &root, emit);
-            // The child has exited (EOF); drop the handle so a later cancel()
-            // doesn't touch a stale process.
-            let _ = active.lock().unwrap().take();
+            stream_reader(&run, stdout, &emit);
+            // EOF from an older reader must never discard a newer child.
+            // Also kill/reap on truncation or read errors, not just EOF.
+            finish_search(&active, run.id);
         });
         Ok(id)
     }
@@ -146,11 +219,10 @@ impl SearchRegistry {
     /// Fallback when rg is unavailable: the embedded ripgrep engine
     /// (`grep-regex` + `grep-searcher`) over the same bounded `ignore` walk.
     /// Unlike a substring scan this honors regex queries, applies smart-case
-    /// like the rg path, decodes UTF-16 files, and stops at binary content —
-    /// so Windows installs without `rg.exe` keep the full search contract.
+    /// like the rg path, decodes UTF-16 files, and stops at binary content.
     fn start_fallback(
         &self,
-        id: u64,
+        run: SearchRun,
         root: PathBuf,
         query: String,
         opts: SearchOpts,
@@ -158,7 +230,7 @@ impl SearchRegistry {
         emit: SearchEmit,
     ) -> AppResult<u64> {
         let pattern = if opts.regex {
-            query.clone()
+            query
         } else {
             literal_pattern(&query)
         };
@@ -167,76 +239,135 @@ impl SearchRegistry {
             .build(&pattern)
             .map_err(|error| AppError::InvalidInput(format!("invalid search query: {error}")))?;
 
+        let id = run.id;
+        let active = self.active.clone();
         thread::spawn(move || {
-            let mut matches = Vec::new();
-            let mut truncated = false;
-            let mut last_flush = Instant::now();
-            let mut searcher = grep_searcher::SearcherBuilder::new()
-                .binary_detection(grep_searcher::BinaryDetection::quit(b'\x00'))
-                .build();
-
-            let walk_root = root.clone();
-            let walker = ignore::WalkBuilder::new(&root)
-                .hidden(false)
-                .git_ignore(true)
-                .filter_entry(move |e| {
-                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                    match paths::rel_of(&walk_root, e.path()) {
-                        Some(rel) => !excludes.is_excluded_entry(&rel, is_dir),
-                        None => true,
-                    }
-                })
-                .build();
-
-            'outer: for entry in walker.flatten() {
-                if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                    continue;
-                }
-                let meta = match entry.metadata() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                if meta.len() > FALLBACK_MAX_FILE_BYTES {
-                    continue;
-                }
-                let Some(rel) = paths::rel_of(&root, entry.path()) else {
-                    continue;
-                };
-                let mut sink = CollectSink {
-                    rel: &rel,
-                    matcher: &matcher,
-                    matches: &mut matches,
-                };
-                // Unreadable or unsearchable files are skipped, as before.
-                let _ = searcher.search_path(&matcher, entry.path(), &mut sink);
-                if matches.len() >= MAX_MATCHES {
-                    truncated = true;
-                    break 'outer;
-                }
-                if last_flush.elapsed() > Duration::from_millis(CHUNK_FLUSH_MS)
-                    && !matches.is_empty()
-                {
-                    emit_chunk(&emit, id, &mut matches);
-                    last_flush = Instant::now();
-                }
-            }
-            if !matches.is_empty() {
-                emit_chunk(&emit, id, &mut matches);
-            }
-            emit(
-                "done",
-                serde_json::json!({ "id": id, "truncated": truncated }),
-            );
+            fallback_search(&run, root, matcher, excludes, &emit);
+            finish_search(&active, run.id);
         });
         Ok(id)
     }
 }
 
+impl Drop for SearchRegistry {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+fn stop_child(child: &mut Child) {
+    let _ = child.kill();
+    // Dropping Child does not reap it; wait even when kill reports that
+    // the process has already exited.
+    let _ = child.wait();
+}
+
+fn stop_search(search: Option<ActiveSearch>) {
+    if let Some(mut child) = search.and_then(|search| search.child) {
+        stop_child(&mut child);
+    }
+}
+
+fn finish_search(active: &ActiveSlot, id: u64) {
+    let finished = {
+        let mut active = active.lock().unwrap();
+        if active.as_ref().map(|search| search.run.id) == Some(id) {
+            active.take()
+        } else {
+            None
+        }
+    };
+    // Never hold the registry lock while waiting for a process to exit.
+    stop_search(finished);
+}
+
+fn fallback_search(
+    run: &SearchRun,
+    root: PathBuf,
+    matcher: grep_regex::RegexMatcher,
+    excludes: Arc<IgnoreRules>,
+    emit: &SearchEmit,
+) {
+    if run.is_cancelled() {
+        return;
+    }
+    let mut matches = Vec::new();
+    let mut total = 0;
+    let mut truncated = false;
+    let mut last_flush = Instant::now();
+    let mut searcher = grep_searcher::SearcherBuilder::new()
+        .binary_detection(grep_searcher::BinaryDetection::quit(b'\x00'))
+        .build();
+
+    let walk_root = root.clone();
+    let walk_run = run.clone();
+    let walker = ignore::WalkBuilder::new(&root)
+        .hidden(false)
+        .git_ignore(true)
+        .filter_entry(move |e| {
+            if walk_run.is_cancelled() {
+                return false;
+            }
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            match paths::rel_of(&walk_root, e.path()) {
+                Some(rel) => !excludes.is_excluded_entry(&rel, is_dir),
+                None => true,
+            }
+        })
+        .build();
+
+    for entry in walker.flatten() {
+        if run.is_cancelled() {
+            return;
+        }
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() > FALLBACK_MAX_FILE_BYTES {
+            continue;
+        }
+        let Some(rel) = paths::rel_of(&root, entry.path()) else {
+            continue;
+        };
+        let mut sink = CollectSink {
+            run,
+            rel: &rel,
+            matcher: &matcher,
+            matches: &mut matches,
+            total: &mut total,
+        };
+        // Unreadable or unsearchable files are skipped, as before. Files
+        // without matching lines are bounded by FALLBACK_MAX_FILE_BYTES.
+        let _ = searcher.search_path(&matcher, entry.path(), &mut sink);
+        if run.is_cancelled() {
+            return;
+        }
+        if total >= MAX_MATCHES {
+            truncated = true;
+            break;
+        }
+        if last_flush.elapsed() > Duration::from_millis(CHUNK_FLUSH_MS) && !matches.is_empty() {
+            emit_chunk(emit, run, &mut matches);
+            last_flush = Instant::now();
+        }
+    }
+    if !matches.is_empty() {
+        emit_chunk(emit, run, &mut matches);
+    }
+    emit_done(emit, run, truncated);
+}
+
 /// `grep_searcher::Sink` collecting one `SearchMatch` per matched line.
 struct CollectSink<'a> {
+    run: &'a SearchRun,
     rel: &'a str,
     matcher: &'a grep_regex::RegexMatcher,
     matches: &'a mut Vec<SearchMatch>,
+    total: &'a mut usize,
 }
 
 impl grep_searcher::Sink for CollectSink<'_> {
@@ -248,6 +379,9 @@ impl grep_searcher::Sink for CollectSink<'_> {
         mat: &grep_searcher::SinkMatch<'_>,
     ) -> Result<bool, Self::Error> {
         use grep_matcher::Matcher;
+        if self.run.is_cancelled() || *self.total >= MAX_MATCHES {
+            return Ok(false);
+        }
         let bytes = mat.bytes();
         // Column of the first match inside the line, mirroring rg's
         // 1-based byte `--column` output.
@@ -268,7 +402,8 @@ impl grep_searcher::Sink for CollectSink<'_> {
                 .take(400)
                 .collect(),
         });
-        Ok(self.matches.len() < MAX_MATCHES)
+        *self.total += 1;
+        Ok(*self.total < MAX_MATCHES && !self.run.is_cancelled())
     }
 }
 
@@ -293,9 +428,22 @@ fn rg_bin() -> &'static str {
     }
 }
 
-fn emit_chunk(emit: &SearchEmit, id: u64, matches: &mut Vec<SearchMatch>) {
-    let batch: Vec<SearchMatch> = std::mem::take(matches);
-    emit("chunk", serde_json::json!({ "id": id, "matches": batch }));
+// An emit already in flight may race cancellation. Do not hold registry
+// locks across callbacks: the frontend also rejects obsolete ids/tokens.
+fn emit_chunk(emit: &SearchEmit, run: &SearchRun, matches: &mut Vec<SearchMatch>) {
+    if !run.is_cancelled() {
+        let batch: Vec<SearchMatch> = std::mem::take(matches);
+        emit("chunk", serde_json::json!({ "id": run.id, "matches": batch }));
+    }
+}
+
+fn emit_done(emit: &SearchEmit, run: &SearchRun, truncated: bool) {
+    if !run.is_cancelled() {
+        emit(
+            "done",
+            serde_json::json!({ "id": run.id, "truncated": truncated }),
+        );
+    }
 }
 
 /// Parse one `--null`-separated rg record: `<path>\0<line>:<col>:<text>`.
@@ -310,19 +458,23 @@ pub fn parse_rg_record(record: &[u8]) -> Option<(String, u32, u32, String)> {
     Some((path, line, col, text))
 }
 
-fn stream_reader(id: u64, stdout: impl std::io::Read, root: &Path, emit: SearchEmit) {
+fn stream_reader(run: &SearchRun, stdout: impl std::io::Read, emit: &SearchEmit) {
     // rg with --null emits `path\0line:col:text\n`. Read by '\n' lines but
     // strip the embedded NUL inside the record.
     let mut reader = BufReader::new(stdout);
     let mut matches = Vec::new();
+    let mut total = 0;
     let mut truncated = false;
     let mut last_flush = Instant::now();
     let mut buf = Vec::new();
-    loop {
+    while !run.is_cancelled() {
         buf.clear();
         match reader.read_until(b'\n', &mut buf) {
             Ok(0) => break,
             Ok(_) => {
+                if run.is_cancelled() {
+                    return;
+                }
                 if let Some((path, line, col, text)) = parse_rg_record(&buf) {
                     // Normalize "./x" prefixes rg prints for cwd searches.
                     let path = paths::normalize(path.trim_start_matches("./"));
@@ -334,7 +486,8 @@ fn stream_reader(id: u64, stdout: impl std::io::Read, root: &Path, emit: SearchE
                             col,
                             text: text.chars().take(400).collect(),
                         });
-                        if matches.len() >= MAX_MATCHES {
+                        total += 1;
+                        if total >= MAX_MATCHES {
                             truncated = true;
                             break;
                         }
@@ -343,21 +496,17 @@ fn stream_reader(id: u64, stdout: impl std::io::Read, root: &Path, emit: SearchE
                 if last_flush.elapsed() > Duration::from_millis(CHUNK_FLUSH_MS)
                     && !matches.is_empty()
                 {
-                    emit_chunk(&emit, id, &mut matches);
+                    emit_chunk(emit, run, &mut matches);
                     last_flush = Instant::now();
                 }
             }
             Err(_) => break,
         }
     }
-    let _ = root;
     if !matches.is_empty() {
-        emit_chunk(&emit, id, &mut matches);
+        emit_chunk(emit, run, &mut matches);
     }
-    emit(
-        "done",
-        serde_json::json!({ "id": id, "truncated": truncated }),
-    );
+    emit_done(emit, run, truncated);
 }
 
 #[cfg(test)]
@@ -415,6 +564,7 @@ mod tests {
         // fallback), the same query must fail the command up front — the
         // frontend can then show the error instead of "0 results".
         let registry = SearchRegistry::new();
+        let previous = registry.begin();
         let emit: SearchEmit = Arc::new(|_, _| {});
         let err = registry
             .start(
@@ -429,6 +579,8 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
+        assert!(previous.is_cancelled());
+        assert!(registry.active.lock().unwrap().is_none());
     }
 
     #[test]
@@ -437,7 +589,7 @@ mod tests {
         let emit: SearchEmit = Arc::new(|_, _| {});
         let err = registry
             .start_fallback(
-                1,
+                registry.begin(),
                 std::env::temp_dir(),
                 "(".to_string(),
                 SearchOpts {
@@ -481,7 +633,7 @@ mod tests {
         };
         registry
             .start_fallback(
-                7,
+                registry.begin(),
                 root,
                 query.to_string(),
                 opts,
@@ -504,10 +656,11 @@ mod tests {
     }
 
     fn temp_workspace(files: &[(&str, &str)]) -> PathBuf {
+        static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "aice-search-test-{}-{}",
             std::process::id(),
-            files.len()
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&dir);
         for (rel, content) in files {
@@ -576,5 +729,336 @@ mod tests {
         );
         assert!(literal.is_empty());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn matcher(query: &str) -> grep_regex::RegexMatcher {
+        grep_regex::RegexMatcherBuilder::new()
+            .build(query)
+            .unwrap()
+    }
+
+    type EventLog = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+    fn event_log() -> (SearchEmit, EventLog) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let log = events.clone();
+        let emit: SearchEmit = Arc::new(move |kind, payload| {
+            log.lock().unwrap().push((kind.to_string(), payload));
+        });
+        (emit, events)
+    }
+
+    #[test]
+    fn cancelled_fallback_worker_emits_nothing() {
+        let root = temp_workspace(&[("cancel.txt", "needle\n")]);
+        let registry = SearchRegistry::new();
+        let run = registry.begin();
+        let (emit, events) = event_log();
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        let worker = {
+            let ready = ready.clone();
+            let resume = resume.clone();
+            let root = root.clone();
+            thread::spawn(move || {
+                ready.wait();
+                resume.wait();
+                fallback_search(
+                    &run,
+                    root,
+                    matcher("needle"),
+                    Arc::new(IgnoreRules::new()),
+                    &emit,
+                );
+            })
+        };
+        ready.wait();
+        registry.cancel();
+        resume.wait();
+        worker.join().unwrap();
+        assert!(events.lock().unwrap().is_empty());
+        assert!(registry.active.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fallback_cancellation_from_chunk_suppresses_done() {
+        let root = temp_workspace(&[("cancel.txt", "needle\n")]);
+        let registry = Arc::new(SearchRegistry::new());
+        let run = registry.begin();
+        let (log, events) = event_log();
+        let emit: SearchEmit = {
+            let registry = registry.clone();
+            Arc::new(move |kind, payload| {
+                log(kind, payload);
+                if kind == "chunk" {
+                    registry.cancel();
+                }
+            })
+        };
+        fallback_search(
+            &run,
+            root.clone(),
+            matcher("needle"),
+            Arc::new(IgnoreRules::new()),
+            &emit,
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "chunk");
+        assert!(run.is_cancelled());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replacing_a_fallback_query_retires_only_the_old_run() {
+        let root = temp_workspace(&[("replace.txt", "old query\nnew query\n")]);
+        let registry = SearchRegistry::new();
+        let old = registry.begin();
+        let current = registry.begin();
+        let (emit, events) = event_log();
+        fallback_search(
+            &old,
+            root.clone(),
+            matcher("old"),
+            Arc::new(IgnoreRules::new()),
+            &emit,
+        );
+        finish_search(&registry.active, old.id);
+        assert_eq!(
+            registry.active.lock().unwrap().as_ref().unwrap().run.id,
+            current.id
+        );
+        fallback_search(
+            &current,
+            root.clone(),
+            matcher("new"),
+            Arc::new(IgnoreRules::new()),
+            &emit,
+        );
+        finish_search(&registry.active, current.id);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|(_, payload)| payload["id"] == current.id));
+        assert_eq!(events[0].1["matches"][0]["text"], "new query");
+        assert_eq!(events[1].0, "done");
+        assert!(registry.active.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fallback_sink_checks_cancellation_and_counts_flushed_matches() {
+        let registry = SearchRegistry::new();
+        let run = registry.begin();
+        let matcher = matcher("needle");
+        let mut matches = Vec::new();
+        let mut total = 0;
+        let mut searcher = grep_searcher::SearcherBuilder::new().build();
+        let mut collect =
+            |run: &SearchRun, count: usize, matches: &mut Vec<SearchMatch>, total: &mut usize| {
+                let mut sink = CollectSink {
+                    run,
+                    rel: "file.txt",
+                    matcher: &matcher,
+                    matches,
+                    total,
+                };
+                searcher
+                    .search_slice(&matcher, "needle\n".repeat(count).as_bytes(), &mut sink)
+                    .unwrap();
+            };
+        collect(&run, MAX_MATCHES - 1, &mut matches, &mut total);
+        let (emit, events) = event_log();
+        emit_chunk(&emit, &run, &mut matches);
+        assert!(matches.is_empty());
+        collect(&run, 10, &mut matches, &mut total);
+        assert_eq!(total, MAX_MATCHES);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            events.lock().unwrap()[0].1["matches"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_MATCHES - 1
+        );
+
+        let next = registry.begin();
+        matches.clear();
+        total = 0;
+        collect(&next, 1, &mut matches, &mut total);
+        registry.cancel();
+        collect(&next, 10, &mut matches, &mut total);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn dropping_the_registry_cancels_pending_fallback_work() {
+        let registry = SearchRegistry::new();
+        let run = registry.begin();
+        drop(registry);
+        assert!(run.is_cancelled());
+    }
+
+    #[test]
+    fn concurrent_starts_leave_only_the_latest_reserved_id_active() {
+        let registry = Arc::new(SearchRegistry::new());
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    registry.begin()
+                })
+            })
+            .collect();
+        let runs: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        let latest = runs.iter().map(|run| run.id).max().unwrap();
+        for run in &runs {
+            assert_eq!(run.is_cancelled(), run.id != latest);
+            if run.id != latest {
+                finish_search(&registry.active, run.id);
+            }
+        }
+        assert_eq!(
+            registry.active.lock().unwrap().as_ref().unwrap().run.id,
+            latest
+        );
+        registry.cancel();
+        assert!(runs.iter().all(SearchRun::is_cancelled));
+    }
+
+    // Spawn the test executable itself, avoiding a dependency on rg, a
+    // shell, or Unix-only commands for child ownership/reaping tests.
+    fn waiting_child() -> Child {
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "search::tests::child_waits_for_stdin",
+                "--ignored",
+            ])
+            .env("AICE_SEARCH_TEST_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    #[ignore = "helper process for search child lifecycle tests"]
+    fn child_waits_for_stdin() {
+        use std::io::Read;
+        if !matches!(std::env::var("AICE_SEARCH_TEST_CHILD").as_deref(), Ok("1")) {
+            return;
+        }
+        let mut input = Vec::new();
+        std::io::stdin().read_to_end(&mut input).unwrap();
+    }
+
+    #[test]
+    fn late_child_registration_is_rejected_and_child_is_reaped() {
+        let registry = SearchRegistry::new();
+        let old = registry.begin();
+        let latest = registry.begin();
+        let mut rejected = registry.register_child(&old, waiting_child()).unwrap_err();
+        stop_child(&mut rejected);
+        assert!(rejected.try_wait().unwrap().is_some());
+        assert_eq!(
+            registry.active.lock().unwrap().as_ref().unwrap().run.id,
+            latest.id
+        );
+        registry.cancel();
+        let mut rejected = registry.register_child(&latest, waiting_child()).unwrap_err();
+        stop_child(&mut rejected);
+        assert!(rejected.try_wait().unwrap().is_some());
+        assert!(registry.active.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn old_reader_eof_cannot_discard_the_replacement_child() {
+        struct PausedEof {
+            entered: Arc<std::sync::Barrier>,
+            resume: Arc<std::sync::Barrier>,
+        }
+        impl std::io::Read for PausedEof {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                self.entered.wait();
+                self.resume.wait();
+                Ok(0)
+            }
+        }
+        let registry = SearchRegistry::new();
+        let old = registry.begin();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        let (emit, events) = event_log();
+        let worker = {
+            let active = registry.active.clone();
+            let reader = PausedEof {
+                entered: entered.clone(),
+                resume: resume.clone(),
+            };
+            thread::spawn(move || {
+                stream_reader(&old, reader, &emit);
+                finish_search(&active, old.id);
+            })
+        };
+        entered.wait();
+        let latest = registry.begin();
+        let child = waiting_child();
+        let pid = child.id();
+        registry.register_child(&latest, child).unwrap();
+        resume.wait();
+        worker.join().unwrap();
+        {
+            let active = registry.active.lock().unwrap();
+            let active = active.as_ref().unwrap();
+            assert_eq!(active.run.id, latest.id);
+            assert_eq!(active.child.as_ref().unwrap().id(), pid);
+        }
+        assert!(events.lock().unwrap().is_empty());
+        registry.cancel();
+        assert!(latest.is_cancelled());
+        assert!(registry.active.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn stream_truncates_and_suppresses_done_after_cancellation() {
+        let registry = Arc::new(SearchRegistry::new());
+        let run = registry.begin();
+        let input = "file.txt\x001:1:needle\n".repeat(MAX_MATCHES + 10);
+        let (emit, events) = event_log();
+        stream_reader(&run, input.as_bytes(), &emit);
+        let events = events.lock().unwrap();
+        let count: usize = events
+            .iter()
+            .filter(|(kind, _)| kind == "chunk")
+            .map(|(_, payload)| payload["matches"].as_array().unwrap().len())
+            .sum();
+        assert_eq!(count, MAX_MATCHES);
+        assert_eq!(events.last().unwrap().1["truncated"], true);
+        drop(events);
+
+        let run = registry.begin();
+        let (log, events) = event_log();
+        let emit: SearchEmit = {
+            let registry = registry.clone();
+            Arc::new(move |kind, payload| {
+                log(kind, payload);
+                if kind == "chunk" {
+                    registry.cancel();
+                }
+            })
+        };
+        stream_reader(&run, b"file.txt\x001:1:needle\n".as_slice(), &emit);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "chunk");
     }
 }

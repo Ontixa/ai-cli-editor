@@ -45,7 +45,7 @@ export interface SearchStatusInput {
 export function searchStatusText(s: SearchStatusInput): string {
   if (s.error) return s.error;
   if (s.running) return `searching… ${s.matchCount}`;
-  if (!s.query) return "type to search";
+  if (!s.query.trim()) return "type to search";
   const n = s.matchCount;
   const base = `${n} ${n === 1 ? "result" : "results"}`;
   return s.truncated ? `${base} (truncated)` : base;

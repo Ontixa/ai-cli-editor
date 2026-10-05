@@ -251,10 +251,13 @@ fn open_workspace(
         );
     }
 
-    *state.root.lock().unwrap() = Some(root.clone());
-    // A streamed search belongs to the workspace that started it —
-    // activating a project abandons any in-flight search.
-    state.search.cancel();
+    {
+        // Root transitions and search registration use the same lock, so
+        // a delayed command cannot start in the newly active workspace.
+        let mut active_root = state.root.lock().unwrap();
+        state.search.cancel();
+        *active_root = Some(root.clone());
+    }
     // Frontend learns current sessions (incl. restored history) once.
     emit_sessions(&app, &root, true);
 
@@ -273,8 +276,11 @@ fn activate_workspace(
 ) -> AppResult<WorkspaceInfo> {
     let root = workspace_key(&state, &path)
         .ok_or_else(|| AppError::NotFound(format!("workspace not open: {path}")))?;
-    *state.root.lock().unwrap() = Some(root.clone());
-    state.search.cancel();
+    {
+        let mut active_root = state.root.lock().unwrap();
+        state.search.cancel();
+        *active_root = Some(root.clone());
+    }
     emit_sessions(&app, &root, true);
     Ok(WorkspaceInfo {
         root: root.to_string_lossy().to_string(),
@@ -291,14 +297,17 @@ fn close_workspace(app: AppHandle, state: State<AppState>, path: String) -> AppR
     };
     state.workspaces.lock().unwrap().remove(&root); // dropping stops the watcher
     state.last_session_emit.lock().unwrap().remove(&root);
-    state.search.cancel();
 
     let norm = root.to_string_lossy().to_string();
     for pty_id in state.sessions.detach_root(&norm) {
         let _ = state.ptys.kill(pty_id);
     }
-    if state.root.lock().unwrap().as_ref() == Some(&root) {
-        *state.root.lock().unwrap() = None;
+    {
+        let mut active_root = state.root.lock().unwrap();
+        if active_root.as_ref() == Some(&root) {
+            state.search.cancel();
+            *active_root = None;
+        }
     }
     emit_sessions(&app, &root, true);
     persist_sessions(&app, true);
@@ -455,6 +464,19 @@ fn git_commit(app: AppHandle, state: State<AppState>, message: String) -> AppRes
 
 // ---------- search ----------
 
+fn search_workspace_root<'a>(
+    active_root: &'a Option<PathBuf>,
+    workspace_root: &str,
+) -> AppResult<&'a PathBuf> {
+    let root = active_root.as_ref().ok_or(AppError::NoWorkspace)?;
+    if paths::normalize(workspace_root) != paths::normalize(&root.to_string_lossy()) {
+        return Err(AppError::InvalidInput(
+            "search workspace is no longer active".into(),
+        ));
+    }
+    Ok(root)
+}
+
 #[tauri::command]
 fn search_start(
     app: AppHandle,
@@ -462,12 +484,17 @@ fn search_start(
     query: String,
     case_sensitive: bool,
     regex: bool,
+    workspace_root: String,
 ) -> AppResult<u64> {
+    // Keep this guard until start has registered the run. Workspace
+    // activation cancels under the same lock before changing the root.
+    let active_root = state.root.lock().unwrap();
+    let root = search_workspace_root(&active_root, &workspace_root)?;
     let emit: search::SearchEmit = Arc::new(move |kind, payload| {
         let _ = app.emit(&format!("search:{kind}"), payload);
     });
     state.search.start(
-        state.root()?,
+        root.clone(),
         query,
         search::SearchOpts {
             case_sensitive,
@@ -1008,4 +1035,35 @@ pub fn run() {
                 app.state::<AppState>().ptys.kill_all();
             }
         });
+}
+
+#[cfg(test)]
+mod search_workspace_tests {
+    use super::*;
+
+    #[test]
+    fn search_rejects_a_missing_or_changed_workspace() {
+        assert!(matches!(
+            search_workspace_root(&None, "/work/old"),
+            Err(AppError::NoWorkspace)
+        ));
+        let active = Some(PathBuf::from("/work/current"));
+        assert!(matches!(
+            search_workspace_root(&active, "/work/old"),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn search_accepts_only_the_normalized_current_root() {
+        let active = Some(PathBuf::from("/work/current"));
+        assert_eq!(
+            search_workspace_root(&active, "/work/./current").unwrap(),
+            active.as_ref().unwrap()
+        );
+        assert!(matches!(
+            search_workspace_root(&active, "/work/current/../other"),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
 }

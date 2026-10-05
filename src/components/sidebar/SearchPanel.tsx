@@ -1,28 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { store } from "../../state/app";
 import { useStore } from "../../lib/store";
-import { openFile, runSearch, cancelSearch, markUserAction } from "../../state/actions";
+import {
+  openFile,
+  runSearch,
+  cancelSearch,
+  updateSearchInput,
+  markUserAction,
+} from "../../state/actions";
 import { groupSearchMatches, searchStatusText } from "../../lib/search";
 
 export function SearchPanel() {
   const search = useStore(store, (s) => s.search);
   const searchFocus = useStore(store, (s) => s.searchFocus);
   const workspace = useStore(store, (s) => s.workspace);
-  const [query, setQuery] = useState(search.query);
-  const [caseSensitive, setCaseSensitive] = useState(false);
-  const [regex, setRegex] = useState(false);
+  const { query, caseSensitive, regex } = search;
   const inputRef = useRef<HTMLInputElement>(null);
-  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const composing = useRef(false);
+
+  useEffect(() => {
+    composing.current = false;
+    return () => cancelSearch();
+  }, [workspace?.root]);
 
   useEffect(() => {
     inputRef.current?.focus();
     inputRef.current?.select();
   }, [searchFocus]);
-
-  const submit = (q: string, cs = caseSensitive, rx = regex) => {
-    if (debounce.current) clearTimeout(debounce.current);
-    debounce.current = setTimeout(() => void runSearch(q, cs, rx), 280);
-  };
 
   const groups = useMemo(() => groupSearchMatches(search.matches), [search.matches]);
 
@@ -43,14 +47,28 @@ export function SearchPanel() {
           ref={inputRef}
           className="text-input"
           placeholder="Search workspace"
+          aria-label="Search workspace"
           value={query}
           onChange={(e) => {
-            setQuery(e.target.value);
-            submit(e.target.value);
+            updateSearchInput(e.target.value, caseSensitive, regex, !composing.current);
+          }}
+          onCompositionStart={() => {
+            composing.current = true;
+            cancelSearch();
+          }}
+          onCompositionEnd={(e) => {
+            composing.current = false;
+            updateSearchInput(e.currentTarget.value, caseSensitive, regex);
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter") void runSearch(query, caseSensitive, regex);
-            if (e.key === "Escape") cancelSearch();
+            if (composing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void runSearch(query, caseSensitive, regex);
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancelSearch();
+            }
           }}
           spellCheck={false}
         />
@@ -58,9 +76,9 @@ export function SearchPanel() {
           <button
             className={`icon-btn ${caseSensitive ? "on" : ""}`}
             title="Match case"
+            aria-pressed={caseSensitive}
             onClick={() => {
-              setCaseSensitive(!caseSensitive);
-              submit(query, !caseSensitive, regex);
+              updateSearchInput(query, !caseSensitive, regex, !composing.current);
             }}
           >
             Aa
@@ -68,9 +86,9 @@ export function SearchPanel() {
           <button
             className={`icon-btn ${regex ? "on" : ""}`}
             title="Regex"
+            aria-pressed={regex}
             onClick={() => {
-              setRegex(!regex);
-              submit(query, caseSensitive, !regex);
+              updateSearchInput(query, caseSensitive, !regex, !composing.current);
             }}
           >
             .*
@@ -104,7 +122,7 @@ export function SearchPanel() {
             ))}
           </div>
         ))}
-        {!search.running && !search.error && search.query && groups.length === 0 && (
+        {!search.running && !search.error && search.query.trim() && groups.length === 0 && (
           <div className="empty-hint pad">no matches</div>
         )}
       </div>
