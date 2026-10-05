@@ -2,8 +2,9 @@ import { useEffect, useRef } from "react";
 import { StateEffect } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { store } from "../../state/app";
+import { useStore } from "../../lib/store";
 import { editorManager } from "../../lib/editor-manager";
-import { markDocDirty } from "../../state/actions";
+import { ensureFileLoaded, markDocDirty } from "../../state/actions";
 
 const listenerApplied = new WeakSet<EditorView>();
 
@@ -15,18 +16,18 @@ const listenerApplied = new WeakSet<EditorView>();
  */
 export function EditorHost({ path }: { path: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const root = useStore(store, (s) => s.workspace?.root);
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const root = store.get().workspace?.root;
     if (!root) return;
     let view: EditorView | null = null;
     let cancelled = false;
 
     const attach = async () => {
-      await editorManager.loadDoc(root, path);
-      if (cancelled) return;
+      const loaded = await ensureFileLoaded(root, path);
+      if (cancelled || !loaded || store.get().workspace?.root !== root) return;
       view = editorManager.attach(root, path, host);
       if (!view) return;
       if (!listenerApplied.has(view)) {
@@ -34,9 +35,9 @@ export function EditorHost({ path }: { path: string }) {
         view.dispatch({
           effects: StateEffect.appendConfig.of([
             EditorView.updateListener.of((u) => {
-              // Only mutate state while this project is still active.
+              // Late editor updates still belong to their original project.
+              if (u.docChanged) markDocDirty(path, true, root);
               if (store.get().workspace?.root !== root) return;
-              if (u.docChanged) markDocDirty(path, true);
               if (u.selectionSet) {
                 const head = u.state.selection.main.head;
                 const line = u.state.doc.lineAt(head);
@@ -58,7 +59,7 @@ export function EditorHost({ path }: { path: string }) {
       cancelled = true;
       editorManager.detach(root, path);
     };
-  }, [path]);
+  }, [root, path]);
 
   return <div ref={hostRef} className="editor-host" />;
 }
