@@ -28,6 +28,10 @@ test, and commit.
      Capture strategy: run `npm run tauri:dev`, open a small repo, run a
      coding CLI in the terminal panel, screenshot at 1440x900. -->
 
+Quick Open (`Ctrl+P`) accepts `file:line` and `file:line:column`, for example
+`src/app.ts:42:7`. Search stays fuzzy; the selected file opens at the requested
+1-based position. Exact filenames containing a numeric colon suffix take priority.
+
 ## Why
 
 Heavy editors do too much when a coding agent does the typing. Language
