@@ -27,9 +27,9 @@ describe("groupSearchMatches", () => {
 });
 
 describe("searchStatusText", () => {
-  it("prompts for input before any query ran", () => {
+  it.each(["", "   ", "\t"])("prompts for input for a blank query: %j", (query) => {
     expect(
-      searchStatusText({ running: false, query: "", matchCount: 0, truncated: false, error: null }),
+      searchStatusText({ running: false, query, matchCount: 0, truncated: false, error: null }),
     ).toBe("type to search");
   });
 

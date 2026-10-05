@@ -64,8 +64,8 @@ export const api = {
   gitStage: (paths: string[]) => invoke<void>("git_stage", { paths }),
   gitUnstage: (paths: string[]) => invoke<void>("git_unstage", { paths }),
   gitCommit: (message: string) => invoke<void>("git_commit", { message }),
-  searchStart: (query: string, caseSensitive: boolean, regex: boolean) =>
-    invoke<number>("search_start", { query, caseSensitive, regex }),
+  searchStart: (query: string, caseSensitive: boolean, regex: boolean, workspaceRoot: string) =>
+    invoke<number>("search_start", { query, caseSensitive, regex, workspaceRoot }),
   searchCancel: () => invoke<void>("search_cancel"),
   getWatchExcludes: () => invoke<WatchExcludesInfo>("get_watch_excludes"),
   /** Replace the user's watch-exclude patterns; returns the normalized

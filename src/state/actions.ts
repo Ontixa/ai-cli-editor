@@ -48,6 +48,9 @@ import type {
   FsBatch,
   FsChange,
   RestorePlan,
+  SearchChunk,
+  SearchDone,
+  SearchMatch,
   UsageReport,
   WorkspaceInfo,
 } from "../lib/types";
@@ -280,7 +283,7 @@ function takeSnapshot(s: AppState): ProjectSnapshot {
     mergeReadiness: s.mergeReadiness,
     fileIndex: s.fileIndex,
     fileIndexTruncated: s.fileIndexTruncated,
-    search: s.search.running ? { ...s.search, running: false } : s.search,
+    search: { ...s.search, id: 0, running: false },
     cursor: s.cursor,
   };
 }
@@ -308,7 +311,16 @@ function freshProjectFields(info: WorkspaceInfo): ProjectSnapshot {
     mergeReadiness: [],
     fileIndex: null,
     fileIndexTruncated: false,
-    search: { id: 0, query: "", matches: [], running: false, truncated: false, error: null },
+    search: {
+      id: 0,
+      query: "",
+      caseSensitive: false,
+      regex: false,
+      matches: [],
+      running: false,
+      truncated: false,
+      error: null,
+    },
     cursor: null,
   };
 }
@@ -374,31 +386,36 @@ export async function openWorkspacePath(path: string) {
     await activateProject(existing.root);
     return;
   }
-  let info;
+  beginSearchTransition();
   try {
-    info = await api.openWorkspace(path);
-  } catch (e) {
-    store.set({ workspaceError: `Could not open ${path}: ${String(e)}` });
-    return;
+    let info;
+    try {
+      info = await api.openWorkspace(path);
+    } catch (e) {
+      store.set({ workspaceError: `Could not open ${path}: ${String(e)}` });
+      return;
+    }
+    const s = store.get();
+    // Already open under a different path spelling → just switch to it.
+    if (s.projects.some((p) => p.root === info.root)) {
+      await activateProject(info.root);
+      return;
+    }
+    const projectData = { ...s.projectData };
+    if (s.workspace) projectData[s.workspace.root] = takeSnapshot(s);
+    store.set({
+      ...freshProjectFields(info),
+      projects: [...s.projects, { root: info.root, name: info.name }],
+      projectData,
+      workspaceError: null,
+    });
+    touchRecentProject(info.root);
+    refreshAfterActivate();
+    markUserAction();
+    schedulePersist();
+  } finally {
+    searchTransitions -= 1;
   }
-  const s = store.get();
-  // Already open under a different path spelling → just switch to it.
-  if (s.projects.some((p) => p.root === info.root)) {
-    await activateProject(info.root);
-    return;
-  }
-  const projectData = { ...s.projectData };
-  if (s.workspace) projectData[s.workspace.root] = takeSnapshot(s);
-  store.set({
-    ...freshProjectFields(info),
-    projects: [...s.projects, { root: info.root, name: info.name }],
-    projectData,
-    workspaceError: null,
-  });
-  touchRecentProject(info.root);
-  refreshAfterActivate();
-  markUserAction();
-  schedulePersist();
 }
 
 function touchRecentProject(root: string) {
@@ -412,18 +429,29 @@ export async function activateProject(root: string) {
   if (!s.workspace || s.workspace.root === root) return;
   const snap = s.projectData[root];
   if (!snap) return;
+  beginSearchTransition();
   try {
-    await api.activateWorkspace(root);
-  } catch {
-    return; // backend no longer has it — closeProject will reconcile
+    try {
+      await api.activateWorkspace(root);
+    } catch {
+      return; // backend no longer has it — closeProject will reconcile
+    }
+    const current = store.get();
+    const projectData = { ...current.projectData };
+    if (current.workspace) projectData[current.workspace.root] = takeSnapshot(current);
+    delete projectData[root];
+    store.set({
+      ...snap,
+      search: { ...snap.search, id: 0, running: false },
+      projectData,
+      workspaceError: null,
+    });
+    refreshAfterActivate();
+    markUserAction();
+    schedulePersist();
+  } finally {
+    searchTransitions -= 1;
   }
-  const projectData = { ...s.projectData };
-  projectData[s.workspace.root] = takeSnapshot(s);
-  delete projectData[root];
-  store.set({ ...snap, projectData, workspaceError: null });
-  refreshAfterActivate();
-  markUserAction();
-  schedulePersist();
 }
 
 /** Cycle through project tabs (Ctrl+Alt+Left/Right). */
@@ -502,66 +530,89 @@ export async function closeProject(root: string) {
   const s = store.get();
   if (!s.projects.some((p) => p.root === root)) return;
   const isActive = s.workspace?.root === root;
-  const terms = isActive ? s.terminals : (s.projectData[root]?.terminals ?? []);
-  for (const t of terms) disposeTerm(t.seq);
-  editorManager.dropWorkspace(root);
-  void api.closeWorkspace(root).catch(() => {});
+  if (isActive) beginSearchTransition();
+  try {
+    const terms = isActive ? s.terminals : (s.projectData[root]?.terminals ?? []);
+    for (const t of terms) disposeTerm(t.seq);
+    editorManager.dropWorkspace(root);
+    // Reconcile the tab immediately. The backend only clears the active
+    // root if it still equals this project, so a late close cannot undo
+    // activation of a neighbor or resurrect another concurrently closed tab.
+    void api.closeWorkspace(root).catch(() => {});
 
-  const projects = s.projects.filter((p) => p.root !== root);
-  const projectData = { ...s.projectData };
-  delete projectData[root];
+    const projects = s.projects.filter((p) => p.root !== root);
+    const projectData = { ...s.projectData };
+    delete projectData[root];
 
-  if (!isActive) {
-    store.set({ projects, projectData });
-    schedulePersist();
-    return;
-  }
-
-  // Closing the active tab: hand off to a neighbor, like a browser.
-  const idx = s.projects.findIndex((p) => p.root === root);
-  const next = projects[Math.min(idx, projects.length - 1)];
-  if (next && projectData[next.root]) {
-    const snap = projectData[next.root];
-    delete projectData[next.root];
-    try {
-      await api.activateWorkspace(next.root);
-    } catch {
-      /* may already be active */
+    if (!isActive) {
+      store.set({ projects, projectData });
+      schedulePersist();
+      return;
     }
-    store.set({ projects, projectData, ...snap, workspaceError: null });
-    refreshAfterActivate();
-  } else {
-    // Last project closed — back to the welcome screen.
-    store.set({
-      projects,
-      projectData,
-      workspace: null,
-      tabs: [],
-      activeTab: null,
-      docs: {},
-      expanded: {},
-      dirInvalidations: {},
-      revealRequest: null,
-      git: { isRepo: false, branch: null, changes: [] },
-      activity: [],
-      followBurst: 0,
-      terminals: [],
-      activeTerminal: null,
-      sessions: [],
-      collisions: [],
-      worktrees: [],
-      checkpoints: [],
-      review: {},
-      mergeReadiness: [],
-      fileIndex: null,
-      fileIndexTruncated: false,
-      search: { id: 0, query: "", matches: [], running: false, truncated: false, error: null },
-      cursor: null,
-      workspaceError: null,
-    });
+
+    // Closing the active tab: hand off to a neighbor, like a browser.
+    const idx = s.projects.findIndex((p) => p.root === root);
+    const next = projects[Math.min(idx, projects.length - 1)];
+    if (next && projectData[next.root]) {
+      const snap = projectData[next.root];
+      delete projectData[next.root];
+      try {
+        await api.activateWorkspace(next.root);
+      } catch {
+        /* may already be active */
+      }
+      store.set({
+        projects,
+        projectData,
+        ...snap,
+        search: { ...snap.search, id: 0, running: false },
+        workspaceError: null,
+      });
+      refreshAfterActivate();
+    } else {
+      // Last project closed — back to the welcome screen.
+      store.set({
+        projects,
+        projectData,
+        workspace: null,
+        tabs: [],
+        activeTab: null,
+        docs: {},
+        expanded: {},
+        dirInvalidations: {},
+        revealRequest: null,
+        git: { isRepo: false, branch: null, changes: [] },
+        activity: [],
+        followBurst: 0,
+        terminals: [],
+        activeTerminal: null,
+        sessions: [],
+        collisions: [],
+        worktrees: [],
+        checkpoints: [],
+        review: {},
+        mergeReadiness: [],
+        fileIndex: null,
+        fileIndexTruncated: false,
+        search: {
+          id: 0,
+          query: "",
+          caseSensitive: false,
+          regex: false,
+          matches: [],
+          running: false,
+          truncated: false,
+          error: null,
+        },
+        cursor: null,
+        workspaceError: null,
+      });
+    }
+    markUserAction();
+    schedulePersist();
+  } finally {
+    if (isActive) searchTransitions -= 1;
   }
-  markUserAction();
-  schedulePersist();
 }
 
 /** Close every project except `root` (activates it first). */
@@ -1281,52 +1332,178 @@ export function setPaletteOpen(open: boolean) {
   store.set({ paletteOpen: open });
 }
 
+// One owner for both the debounce and the async start/stream lifecycle. A
+// request object, rather than query text, distinguishes identical retries.
+// Match the backend cap. ID-only events may precede their start response,
+// so retain a bounded overlap window and report overflow rather than guess
+// which unidentified stream belongs to the current request.
+const SEARCH_RESULT_LIMIT = 500;
+const MAX_EARLY_SEARCH_IDS = 32;
+
+interface SearchRequest {
+  root: string;
+  id: number | null;
+  early: Map<number, { matches: SearchMatch[]; done: boolean; truncated: boolean }>;
+}
+let searchRequest: SearchRequest | null = null;
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let searchTransitions = 0;
+let searchCancellation: Promise<void> | null = null;
+
+function clearSearchTimer() {
+  if (searchTimer !== null) clearTimeout(searchTimer);
+  searchTimer = null;
+}
+
+/** Keep the draft with its project, including changes not yet submitted. */
+export function updateSearchInput(
+  query: string,
+  caseSensitive = false,
+  regex = false,
+  schedule = true,
+) {
+  cancelSearch();
+  const root = wsRoot();
+  if (!root) return;
+  const running = schedule && !searchTransitions && !!query.trim();
+  store.set({
+    search: {
+      id: 0,
+      query,
+      caseSensitive,
+      regex,
+      matches: [],
+      running,
+      truncated: false,
+      error: null,
+    },
+  });
+  if (running) {
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      if (wsRoot() === root) void runSearch(query, caseSensitive, regex);
+    }, 280);
+  }
+}
+
 export async function runSearch(query: string, caseSensitive = false, regex = false) {
+  cancelSearch();
   const s = store.get();
-  if (!s.workspace) return;
-  if (!query.trim()) {
-    // Cleared input: stop any in-flight scan and drop stale results so the
-    // panel can't show "N results" (or a stale error) under an empty query.
-    void api.searchCancel();
+  if (!s.workspace || searchTransitions) return;
+  const running = !!query.trim();
+  const request: SearchRequest = { root: s.workspace.root, id: null, early: new Map() };
+  searchRequest = running ? request : null;
+  store.set({
+    search: {
+      id: 0,
+      query,
+      caseSensitive,
+      regex,
+      matches: [],
+      running,
+      truncated: false,
+      error: null,
+    },
+  });
+  if (!running) return;
+  try {
+    // search_cancel is global: let every earlier cancellation settle before
+    // a new start, so a delayed cancel cannot kill the replacement scan.
+    if (searchCancellation) await searchCancellation;
+    if (searchRequest !== request || wsRoot() !== request.root) return;
+    const id = await api.searchStart(query, caseSensitive, regex, request.root);
+    if (searchRequest !== request || wsRoot() !== request.root) return;
+    request.id = id;
+    // Small/empty workspaces may emit their entire stream before invoke
+    // resolves. Replay only the returned backend ID, never an older scan.
+    const early = request.early.get(id);
+    request.early.clear();
     store.set({
       search: {
-        ...s.search,
-        query: "",
-        matches: [],
-        running: false,
-        truncated: false,
-        error: null,
+        ...store.get().search,
+        id,
+        matches: early?.matches ?? [],
+        running: !early?.done,
+        truncated: early?.truncated ?? false,
       },
     });
-    return;
-  }
-  store.set({
-    sidebarVisible: true,
-    sidebarTab: "search",
-    searchFocus: s.searchFocus + 1,
-    search: { ...s.search, query, matches: [], running: true, truncated: false, error: null },
-  });
-  try {
-    const id = await api.searchStart(query, caseSensitive, regex);
-    // A newer runSearch may already have replaced this query — its own
-    // continuation owns the id then.
-    if (store.get().search.query === query) {
-      store.set({ search: { ...store.get().search, id } });
-    }
+    if (early?.done) searchRequest = null;
   } catch (e) {
-    // Surface the failure (invalid regex, spawn error, …) — silently
-    // landing on "0 results" would claim the workspace has no matches.
-    if (store.get().search.query === query) {
-      store.set({
-        search: { ...store.get().search, running: false, error: formatSearchError(e) },
-      });
-    }
+    if (searchRequest !== request || wsRoot() !== request.root) return;
+    searchRequest = null;
+    store.set({
+      search: { ...store.get().search, id: 0, running: false, error: formatSearchError(e) },
+    });
   }
 }
 
 export function cancelSearch() {
-  void api.searchCancel();
-  store.set({ search: { ...store.get().search, running: false } });
+  clearSearchTimer();
+  const s = store.get();
+  const active = searchRequest !== null || s.search.id !== 0;
+  searchRequest = null;
+  if (active) {
+    const cancellation = Promise.all([searchCancellation, api.searchCancel().catch(() => {})]).then(
+      () => {
+        if (searchCancellation === cancellation) searchCancellation = null;
+      },
+    );
+    searchCancellation = cancellation;
+  }
+  if (s.search.running || s.search.id !== 0) {
+    store.set({ search: { ...s.search, id: 0, running: false } });
+  }
+}
+
+function beginSearchTransition() {
+  searchTransitions += 1;
+  cancelSearch();
+}
+
+function applySearchEvent(event: SearchChunk | SearchDone) {
+  const request = searchRequest;
+  const s = store.get();
+  if (!request || request.root !== s.workspace?.root) return;
+  if (request.id === null) {
+    if (!request.early.has(event.id) && request.early.size >= MAX_EARLY_SEARCH_IDS) {
+      cancelSearch();
+      store.set({
+        search: {
+          ...store.get().search,
+          error: "Too many overlapping search results. Press Enter to retry.",
+        },
+      });
+      return;
+    }
+    const early = request.early.get(event.id) ?? { matches: [], done: false, truncated: false };
+    if (early.done) return;
+    if ("matches" in event) {
+      const remaining = SEARCH_RESULT_LIMIT - early.matches.length;
+      early.matches.push(...event.matches.slice(0, remaining));
+      early.truncated ||= event.matches.length > remaining;
+    } else {
+      early.done = true;
+      early.truncated ||= event.truncated;
+    }
+    request.early.set(event.id, early);
+    return;
+  }
+  if (event.id !== request.id || !s.search.running) return;
+  if ("matches" in event) {
+    const remaining = SEARCH_RESULT_LIMIT - s.search.matches.length;
+    store.set({
+      search: {
+        ...s.search,
+        matches: [...s.search.matches, ...event.matches.slice(0, remaining)],
+        truncated: s.search.truncated || event.matches.length > remaining,
+      },
+    });
+  } else {
+    searchRequest = null;
+    store.set({
+      search: { ...s.search, running: false, truncated: s.search.truncated || event.truncated },
+    });
+  }
 }
 
 // ---------- watch excludes ----------
@@ -1703,18 +1880,8 @@ export function setupBackendListeners() {
   void onGitStale((root) => {
     if (root === store.get().workspace?.root) scheduleGitRefresh();
   });
-  void onSearchChunk((chunk) => {
-    const s = store.get();
-    if (chunk.id !== s.search.id) return;
-    store.set({
-      search: { ...s.search, matches: [...s.search.matches, ...chunk.matches] },
-    });
-  });
-  void onSearchDone((done) => {
-    const s = store.get();
-    if (done.id !== s.search.id) return;
-    store.set({ search: { ...s.search, running: false, truncated: done.truncated } });
-  });
+  void onSearchChunk(applySearchEvent);
+  void onSearchDone(applySearchEvent);
   void onSessionUpdate(applySessions);
   // Initial fetch in case the workspace was opened before wiring ran.
   void api
@@ -1751,11 +1918,13 @@ export function focusSearch() {
 }
 
 export function setSidebarTab(tab: AppState["sidebarTab"]) {
+  if (tab !== "search") cancelSearch();
   store.set({ sidebarTab: tab, sidebarVisible: true });
   markUserAction();
 }
 
 export function toggleSidebar() {
+  if (store.get().sidebarVisible) cancelSearch();
   store.set({ sidebarVisible: !store.get().sidebarVisible });
 }
 

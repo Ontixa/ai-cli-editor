@@ -64,6 +64,8 @@ export interface TerminalSession {
 export interface SearchUiState {
   id: number;
   query: string;
+  caseSensitive: boolean;
+  regex: boolean;
   matches: SearchMatch[];
   running: boolean;
   truncated: boolean;
@@ -295,7 +297,16 @@ export const initialState: AppState = {
   exportDialog: null,
   presetDialog: null,
   sessionPresets: [],
-  search: { id: 0, query: "", matches: [], running: false, truncated: false, error: null },
+  search: {
+    id: 0,
+    query: "",
+    caseSensitive: false,
+    regex: false,
+    matches: [],
+    running: false,
+    truncated: false,
+    error: null,
+  },
   recentFiles: [],
   recentProjects: [],
   confirm: null,
