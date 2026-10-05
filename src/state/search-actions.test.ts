@@ -173,6 +173,40 @@ describe("stream ownership", () => {
     chunk({ id: 10, matches: [match] });
     expect(store.get().search.matches).toEqual([match]);
   });
+  it("bounds early and later matches to the backend cap without hiding truncation", async () => {
+    const pending = deferred<number>();
+    vi.mocked(api.searchStart).mockReturnValueOnce(pending.promise);
+    const task = runSearch("needle");
+    chunk({ id: 10, matches: Array.from({ length: 501 }, () => match) });
+    pending.resolve(10);
+    await task;
+    chunk({ id: 10, matches: [match] });
+    done({ id: 10, truncated: false });
+    expect(store.get().search.matches).toHaveLength(500);
+    expect(store.get().search).toMatchObject({ running: false, truncated: true });
+  });
+  it("retains the current ID at the early overlap bound", async () => {
+    const pending = deferred<number>();
+    vi.mocked(api.searchStart).mockReturnValueOnce(pending.promise);
+    const task = runSearch("needle");
+    for (let id = 1; id <= 32; id++) chunk({ id, matches: [{ ...match, line: id }] });
+    pending.resolve(32);
+    await task;
+    expect(store.get().search.matches).toEqual([{ ...match, line: 32 }]);
+    expect(store.get().search.error).toBeNull();
+  });
+  it("reports early stream overflow explicitly and permits a clean retry", async () => {
+    const pending = deferred<number>();
+    vi.mocked(api.searchStart).mockReturnValueOnce(pending.promise);
+    const task = runSearch("needle");
+    for (let id = 1; id <= 33; id++) chunk({ id, matches: [match] });
+    pending.resolve(33);
+    await task;
+    expect(store.get().search).toMatchObject({ id: 0, running: false, matches: [] });
+    expect(store.get().search.error).toContain("Press Enter to retry");
+    await runSearch("needle");
+    expect(store.get().search).toMatchObject({ id: 1, running: true, error: null });
+  });
   it("handles empty completion before search_start resolves", async () => {
     const pending = deferred<number>();
     vi.mocked(api.searchStart).mockReturnValueOnce(pending.promise);

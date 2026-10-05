@@ -1334,6 +1334,12 @@ export function setPaletteOpen(open: boolean) {
 
 // One owner for both the debounce and the async start/stream lifecycle. A
 // request object, rather than query text, distinguishes identical retries.
+// Match the backend cap. ID-only events may precede their start response,
+// so retain a bounded overlap window and report overflow rather than guess
+// which unidentified stream belongs to the current request.
+const SEARCH_RESULT_LIMIT = 500;
+const MAX_EARLY_SEARCH_IDS = 32;
+
 interface SearchRequest {
   root: string;
   id: number | null;
@@ -1459,22 +1465,44 @@ function applySearchEvent(event: SearchChunk | SearchDone) {
   const s = store.get();
   if (!request || request.root !== s.workspace?.root) return;
   if (request.id === null) {
+    if (!request.early.has(event.id) && request.early.size >= MAX_EARLY_SEARCH_IDS) {
+      cancelSearch();
+      store.set({
+        search: {
+          ...store.get().search,
+          error: "Too many overlapping search results. Press Enter to retry.",
+        },
+      });
+      return;
+    }
     const early = request.early.get(event.id) ?? { matches: [], done: false, truncated: false };
     if (early.done) return;
-    if ("matches" in event) early.matches.push(...event.matches);
-    else {
+    if ("matches" in event) {
+      const remaining = SEARCH_RESULT_LIMIT - early.matches.length;
+      early.matches.push(...event.matches.slice(0, remaining));
+      early.truncated ||= event.matches.length > remaining;
+    } else {
       early.done = true;
-      early.truncated = event.truncated;
+      early.truncated ||= event.truncated;
     }
     request.early.set(event.id, early);
     return;
   }
   if (event.id !== request.id || !s.search.running) return;
   if ("matches" in event) {
-    store.set({ search: { ...s.search, matches: [...s.search.matches, ...event.matches] } });
+    const remaining = SEARCH_RESULT_LIMIT - s.search.matches.length;
+    store.set({
+      search: {
+        ...s.search,
+        matches: [...s.search.matches, ...event.matches.slice(0, remaining)],
+        truncated: s.search.truncated || event.matches.length > remaining,
+      },
+    });
   } else {
     searchRequest = null;
-    store.set({ search: { ...s.search, running: false, truncated: event.truncated } });
+    store.set({
+      search: { ...s.search, running: false, truncated: s.search.truncated || event.truncated },
+    });
   }
 }
 

@@ -10,7 +10,7 @@ use crate::paths;
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -199,9 +199,9 @@ impl SearchRegistry {
             .map_err(|e| AppError::Internal(format!("failed to spawn rg: {e}")))?;
 
         let stdout = child.stdout.take().unwrap();
-        if let Err(mut child) = self.register_child(&run, child) {
+        if let Err(child) = self.register_child(&run, child) {
             // Cancellation/replacement may happen while spawn is running.
-            stop_child(&mut child);
+            let _ = retire_child(child);
             return Ok(run.id);
         }
 
@@ -255,16 +255,17 @@ impl Drop for SearchRegistry {
     }
 }
 
-fn stop_child(child: &mut Child) {
+fn retire_child(mut child: Child) -> thread::JoinHandle<std::io::Result<ExitStatus>> {
     let _ = child.kill();
-    // Dropping Child does not reap it; wait even when kill reports that
-    // the process has already exited.
-    let _ = child.wait();
+    // Dropping Child does not reap it. Give the waiter sole ownership,
+    // even if kill reports an already-exited process. Commands may hold
+    // the workspace root lock, so waiting must stay off their call path.
+    thread::spawn(move || child.wait())
 }
 
 fn stop_search(search: Option<ActiveSearch>) {
-    if let Some(mut child) = search.and_then(|search| search.child) {
-        stop_child(&mut child);
+    if let Some(child) = search.and_then(|search| search.child) {
+        let _ = retire_child(child);
     }
 }
 
@@ -277,7 +278,7 @@ fn finish_search(active: &ActiveSlot, id: u64) {
             None
         }
     };
-    // Never hold the registry lock while waiting for a process to exit.
+    // Kill outside the registry lock; reaping runs on its own thread.
     stop_search(finished);
 }
 
@@ -433,7 +434,10 @@ fn rg_bin() -> &'static str {
 fn emit_chunk(emit: &SearchEmit, run: &SearchRun, matches: &mut Vec<SearchMatch>) {
     if !run.is_cancelled() {
         let batch: Vec<SearchMatch> = std::mem::take(matches);
-        emit("chunk", serde_json::json!({ "id": run.id, "matches": batch }));
+        emit(
+            "chunk",
+            serde_json::json!({ "id": run.id, "matches": batch }),
+        );
     }
 }
 
@@ -732,9 +736,7 @@ mod tests {
     }
 
     fn matcher(query: &str) -> grep_regex::RegexMatcher {
-        grep_regex::RegexMatcherBuilder::new()
-            .build(query)
-            .unwrap()
+        grep_regex::RegexMatcherBuilder::new().build(query).unwrap()
     }
 
     type EventLog = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
@@ -839,7 +841,9 @@ mod tests {
         finish_search(&registry.active, current.id);
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 2);
-        assert!(events.iter().all(|(_, payload)| payload["id"] == current.id));
+        assert!(events
+            .iter()
+            .all(|(_, payload)| payload["id"] == current.id));
         assert_eq!(events[0].1["matches"][0]["text"], "new query");
         assert_eq!(events[1].0, "done");
         assert!(registry.active.lock().unwrap().is_none());
@@ -966,22 +970,22 @@ mod tests {
         let registry = SearchRegistry::new();
         let old = registry.begin();
         let latest = registry.begin();
-        let mut rejected = registry.register_child(&old, waiting_child()).unwrap_err();
-        stop_child(&mut rejected);
-        assert!(rejected.try_wait().unwrap().is_some());
+        let rejected = registry.register_child(&old, waiting_child()).unwrap_err();
+        assert!(retire_child(rejected).join().unwrap().is_ok());
         assert_eq!(
             registry.active.lock().unwrap().as_ref().unwrap().run.id,
             latest.id
         );
         registry.cancel();
-        let mut rejected = registry.register_child(&latest, waiting_child()).unwrap_err();
-        stop_child(&mut rejected);
-        assert!(rejected.try_wait().unwrap().is_some());
+        let rejected = registry
+            .register_child(&latest, waiting_child())
+            .unwrap_err();
+        assert!(retire_child(rejected).join().unwrap().is_ok());
         assert!(registry.active.lock().unwrap().is_none());
     }
 
     #[test]
-    fn old_reader_eof_cannot_discard_the_replacement_child() {
+    fn cancel_and_replacement_do_not_wait_for_old_reader_eof() {
         struct PausedEof {
             entered: Arc<std::sync::Barrier>,
             resume: Arc<std::sync::Barrier>,
@@ -993,39 +997,52 @@ mod tests {
                 Ok(0)
             }
         }
-        let registry = SearchRegistry::new();
-        let old = registry.begin();
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let resume = Arc::new(std::sync::Barrier::new(2));
-        let (emit, events) = event_log();
-        let worker = {
-            let active = registry.active.clone();
-            let reader = PausedEof {
-                entered: entered.clone(),
-                resume: resume.clone(),
+        // Cover both direct replacement and an explicit cancel followed
+        // by a new start while the old reader is still blocked.
+        for cancel_first in [false, true] {
+            let registry = SearchRegistry::new();
+            let old = registry.begin();
+            registry.register_child(&old, waiting_child()).unwrap();
+            let entered = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            let (emit, events) = event_log();
+            let worker = {
+                let active = registry.active.clone();
+                let run = old.clone();
+                let reader = PausedEof {
+                    entered: entered.clone(),
+                    resume: resume.clone(),
+                };
+                thread::spawn(move || {
+                    stream_reader(&run, reader, &emit);
+                    finish_search(&active, run.id);
+                })
             };
-            thread::spawn(move || {
-                stream_reader(&old, reader, &emit);
-                finish_search(&active, old.id);
-            })
-        };
-        entered.wait();
-        let latest = registry.begin();
-        let child = waiting_child();
-        let pid = child.id();
-        registry.register_child(&latest, child).unwrap();
-        resume.wait();
-        worker.join().unwrap();
-        {
-            let active = registry.active.lock().unwrap();
-            let active = active.as_ref().unwrap();
-            assert_eq!(active.run.id, latest.id);
-            assert_eq!(active.child.as_ref().unwrap().id(), pid);
+            entered.wait();
+            if cancel_first {
+                registry.cancel();
+                assert!(old.is_cancelled());
+                assert!(registry.active.lock().unwrap().is_none());
+            }
+            let latest = registry.begin();
+            assert!(old.is_cancelled());
+            let child = waiting_child();
+            let pid = child.id();
+            registry.register_child(&latest, child).unwrap();
+            // Both commands returned before the old reader can reach EOF.
+            resume.wait();
+            worker.join().unwrap();
+            {
+                let active = registry.active.lock().unwrap();
+                let active = active.as_ref().unwrap();
+                assert_eq!(active.run.id, latest.id);
+                assert_eq!(active.child.as_ref().unwrap().id(), pid);
+            }
+            assert!(events.lock().unwrap().is_empty());
+            registry.cancel();
+            assert!(latest.is_cancelled());
+            assert!(registry.active.lock().unwrap().is_none());
         }
-        assert!(events.lock().unwrap().is_empty());
-        registry.cancel();
-        assert!(latest.is_cancelled());
-        assert!(registry.active.lock().unwrap().is_none());
     }
 
     #[test]
