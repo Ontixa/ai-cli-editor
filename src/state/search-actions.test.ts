@@ -286,6 +286,22 @@ describe("project ownership", () => {
     expect(store.get().search).toMatchObject({ id: 1, matches: [match], running: true });
     expect(api.searchCancel).not.toHaveBeenCalled();
   });
+  it("overlapping background closes do not restore each other's tabs or snapshots", async () => {
+    await openWorkspacePath("/b");
+    await openWorkspacePath("/c");
+    await activateProject("/a");
+    const b = deferred<void>();
+    const c = deferred<void>();
+    vi.mocked(api.closeWorkspace).mockReturnValueOnce(b.promise).mockReturnValueOnce(c.promise);
+    const closeB = closeProject("/b");
+    const closeC = closeProject("/c");
+    b.resolve();
+    c.resolve();
+    await Promise.all([closeB, closeC]);
+    expect(store.get().projects.map((project) => project.root)).toEqual(["/a"]);
+    expect(store.get().projectData).toEqual({});
+    expect(store.get().workspace?.root).toBe("/a");
+  });
   it("closing the last project invalidates the pending start", async () => {
     const pending = deferred<number>();
     vi.mocked(api.searchStart).mockReturnValueOnce(pending.promise);

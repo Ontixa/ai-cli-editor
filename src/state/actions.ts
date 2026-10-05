@@ -535,7 +535,10 @@ export async function closeProject(root: string) {
     const terms = isActive ? s.terminals : (s.projectData[root]?.terminals ?? []);
     for (const t of terms) disposeTerm(t.seq);
     editorManager.dropWorkspace(root);
-    await api.closeWorkspace(root).catch(() => {});
+    // Reconcile the tab immediately. The backend only clears the active
+    // root if it still equals this project, so a late close cannot undo
+    // activation of a neighbor or resurrect another concurrently closed tab.
+    void api.closeWorkspace(root).catch(() => {});
 
     const projects = s.projects.filter((p) => p.root !== root);
     const projectData = { ...s.projectData };
