@@ -105,8 +105,12 @@ interface PersistedProject {
   activeTab?: string | null;
 }
 
-export async function boot() {
-  if (!inTauri()) return;
+export function boot(): Promise<void> {
+  if (!inTauri()) return Promise.resolve();
+  return withProjectTransition(bootNow);
+}
+
+async function bootNow() {
   applyTheme(store.get().theme);
   void api.detectAgents().then((agents) => store.set({ agents }));
   void api.defaultShell().then((sh) => store.set({ shellLabel: sh.label }));
@@ -185,18 +189,19 @@ async function bootV2(restored: Record<string, unknown>) {
   }
 
   const want = restored.activeProject as string | null;
-  const target = projects.find((p) => p.root === want)?.root ?? projects.at(-1)?.root;
+  let target = projects.find((p) => p.root === want)?.root ?? projects.at(-1)?.root;
   if (!target) {
     store.set({ projects });
     return;
   }
-  const snap = snapshots[target];
-  delete snapshots[target];
   try {
     await api.activateWorkspace(target);
   } catch {
-    /* already active from the last openWorkspace call */
+    // Failed activation leaves the last successfully opened workspace active.
+    target = projects.at(-1)!.root;
   }
+  const snap = snapshots[target];
+  delete snapshots[target];
   store.set({ projects, projectData: snapshots, ...snap });
   void refreshAfterActivate();
 }
@@ -207,7 +212,7 @@ async function bootV1(restored: Record<string, unknown>) {
   const ws = restored.workspace as { root?: string } | null;
   if (!ws?.root) return;
   try {
-    await openWorkspacePath(ws.root);
+    await openWorkspacePathNow(ws.root);
     const tabs = Array.isArray(restored.tabs) ? (restored.tabs as Tab[]) : [];
     const fileTabs = tabs.filter((t) => t.kind === "file");
     if (fileTabs.length) {
@@ -344,33 +349,32 @@ function refreshAfterActivate() {
  * clean docs reload, dirty docs only re-check existence (their conflict
  * flags were already maintained by the background fs handler).
  */
-async function reconcileOpenDocs() {
-  const s = store.get();
-  const root = s.workspace?.root;
+function reconcileOpenDocs() {
+  const root = wsRoot();
   if (!root) return;
-  for (const t of s.tabs) {
-    if (t.kind !== "file") continue;
-    const d = store.get().docs[t.path];
-    if (!d) continue;
-    if (d.dirty) {
-      try {
-        const exists = await api.fileExists(t.path);
-        const cur = store.get().docs[t.path];
-        if (cur) {
-          store.set({
-            docs: {
-              ...store.get().docs,
-              [t.path]: { ...cur, deletedOnDisk: !exists },
-            },
-          });
+  void withWorkspaceOwner(async () => {
+    if (wsRoot() !== root) return;
+    for (const t of store.get().tabs) {
+      if (t.kind !== "file") continue;
+      const d = store.get().docs[t.path];
+      if (!d) continue;
+      if (d.dirty) {
+        try {
+          const exists = await api.fileExists(t.path);
+          const cur = store.get().docs[t.path];
+          if (cur) {
+            store.set({
+              docs: { ...store.get().docs, [t.path]: { ...cur, deletedOnDisk: !exists } },
+            });
+          }
+        } catch {
+          /* best effort */
         }
-      } catch {
-        /* best effort */
+      } else {
+        await reloadFileNow(root, t.path);
       }
-    } else {
-      void reloadFile(t.path);
     }
-  }
+  });
 }
 
 export async function openFolder() {
@@ -379,43 +383,91 @@ export async function openFolder() {
   await openWorkspacePath(picked);
 }
 
-export async function openWorkspacePath(path: string) {
-  const s0 = store.get();
-  const existing = s0.projects.find((p) => p.root === path);
-  if (existing) {
-    await activateProject(existing.root);
+// Keep relative document IO and root-changing IPC under the same owner, through
+// their state commit. Private *Now helpers must never enqueue another operation.
+const workspaceOperations: Array<() => void> = [];
+let workspaceOperationRunning = false;
+
+function withWorkspaceOwner<T>(operation: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    workspaceOperations.push(() => {
+      workspaceOperationRunning = true;
+      try {
+        void operation().then(
+          (result) => finish(() => resolve(result)),
+          (error: unknown) => finish(() => reject(error)),
+        );
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    });
+    function finish(settle: () => void) {
+      workspaceOperationRunning = false;
+      settle();
+      workspaceOperations.shift()?.();
+    }
+    if (!workspaceOperationRunning) workspaceOperations.shift()?.();
+  });
+}
+
+export function openWorkspacePath(path: string): Promise<void> {
+  return withProjectTransition(() => openWorkspacePathNow(path));
+}
+
+function withProjectTransition<T>(operation: () => Promise<T>): Promise<T> {
+  beginSearchTransition();
+  return withWorkspaceOwner(async () => {
+    try {
+      return await operation();
+    } finally {
+      searchTransitions -= 1;
+    }
+  });
+}
+
+async function openWorkspacePathNow(path: string): Promise<void> {
+  if (store.get().projects.some((p) => p.root === path)) {
+    await activateProjectNow(path);
     return;
   }
   beginSearchTransition();
   try {
-    let info;
-    try {
-      info = await api.openWorkspace(path);
-    } catch (e) {
-      store.set({ workspaceError: `Could not open ${path}: ${String(e)}` });
-      return;
+    const info = await api.openWorkspace(path);
+    // open_workspace canonicalizes paths and activates even an existing root.
+    const current = store.get();
+    if (current.workspace?.root !== info.root) {
+      commitProjectActivation(info.root, freshProjectFields(info));
     }
     const s = store.get();
-    // Already open under a different path spelling → just switch to it.
-    if (s.projects.some((p) => p.root === info.root)) {
-      await activateProject(info.root);
-      return;
+    if (!s.projects.some((p) => p.root === info.root)) {
+      store.set({ projects: [...s.projects, { root: info.root, name: info.name }] });
     }
-    const projectData = { ...s.projectData };
-    if (s.workspace) projectData[s.workspace.root] = takeSnapshot(s);
-    store.set({
-      ...freshProjectFields(info),
-      projects: [...s.projects, { root: info.root, name: info.name }],
-      projectData,
-      workspaceError: null,
-    });
+    store.set({ workspaceError: null });
     touchRecentProject(info.root);
     refreshAfterActivate();
     markUserAction();
     schedulePersist();
+  } catch (e) {
+    store.set({ workspaceError: `Could not open ${path}: ${String(e)}` });
   } finally {
     searchTransitions -= 1;
   }
+}
+
+/** Commit only live snapshots: edits and background events may arrive during IPC. */
+function commitProjectActivation(root: string, fallback?: ProjectSnapshot) {
+  const s = store.get();
+  const snap = s.projectData[root] ?? fallback;
+  if (!snap) return;
+  const projectData = { ...s.projectData };
+  if (s.workspace) projectData[s.workspace.root] = takeSnapshot(s);
+  delete projectData[root];
+  store.set({
+    ...snap,
+    search: { ...snap.search, id: 0, running: false },
+    projectData,
+    workspaceError: null,
+  });
 }
 
 function touchRecentProject(root: string) {
@@ -424,31 +476,28 @@ function touchRecentProject(root: string) {
 }
 
 /** Switch to another open project tab. */
-export async function activateProject(root: string) {
+export function activateProject(root: string): Promise<void> {
+  const enqueue = wsRoot() === root ? withWorkspaceOwner : withProjectTransition;
+  return enqueue(async () => {
+    await activateProjectNow(root);
+  });
+}
+
+async function activateProjectNow(root: string): Promise<boolean> {
   const s = store.get();
-  if (!s.workspace || s.workspace.root === root) return;
-  const snap = s.projectData[root];
-  if (!snap) return;
+  if (s.workspace?.root === root) return true;
+  if (!s.projects.some((p) => p.root === root) || !s.projectData[root]) return false;
   beginSearchTransition();
   try {
-    try {
-      await api.activateWorkspace(root);
-    } catch {
-      return; // backend no longer has it — closeProject will reconcile
-    }
-    const current = store.get();
-    const projectData = { ...current.projectData };
-    if (current.workspace) projectData[current.workspace.root] = takeSnapshot(current);
-    delete projectData[root];
-    store.set({
-      ...snap,
-      search: { ...snap.search, id: 0, running: false },
-      projectData,
-      workspaceError: null,
-    });
+    await api.activateWorkspace(root);
+    commitProjectActivation(root);
     refreshAfterActivate();
     markUserAction();
     schedulePersist();
+    return true;
+  } catch (e) {
+    store.set({ workspaceError: `Could not activate ${root}: ${String(e)}` });
+    return false;
   } finally {
     searchTransitions -= 1;
   }
@@ -479,19 +528,18 @@ export function reorderProjects(from: number, to: number) {
 
 /** Dirty-doc check, then close the project tab (terminals die with it). */
 export function requestCloseProject(root: string) {
-  const s = store.get();
-  const proj = s.projects.find((p) => p.root === root);
+  if (dirtyPathsIn(root).length) confirmCloseProject(root);
+  else void closeProject(root);
+}
+
+// Discard only the edits the user approved, not new edits made while queued.
+type DiscardedDocs = Map<string, string | null>;
+
+function confirmCloseProject(root: string) {
+  const proj = store.get().projects.find((p) => p.root === root);
   if (!proj) return;
-  const fields = root === s.workspace?.root ? s : s.projectData[root];
-  const dirty = fields
-    ? Object.entries(fields.docs).filter(
-        ([p, d]) => d.dirty && fields.tabs.some((t) => t.kind === "file" && t.path === p),
-      )
-    : [];
-  if (!dirty.length) {
-    void closeProject(root);
-    return;
-  }
+  const dirty = dirtyPathsIn(root);
+  if (!dirty.length) return;
   askConfirm({
     title: `Close ${proj.name}`,
     message: `${dirty.length} file${dirty.length === 1 ? "" : "s"} in this project have unsaved changes that will be lost.`,
@@ -500,142 +548,116 @@ export function requestCloseProject(root: string) {
       {
         label: "Close Anyway",
         kind: "danger",
-        onPick: () => void closeProject(root),
+        onPick: () => {
+          const discarded = new Map(dirty.map((p) => [p, editorManager.getText(root, p)]));
+          void withWorkspaceOwner(() => closeProjectNow(root, discarded));
+        },
       },
       {
         label: "Save All & Close",
         kind: "primary",
-        onPick: () =>
-          void saveDocsThen(
-            root,
-            dirty.map(([p]) => p),
-            () => closeProject(root),
-          ),
+        onPick: () => void withWorkspaceOwner(() => saveProjectThenCloseNow(root)),
       },
     ],
   });
 }
 
-/** Save dirty docs of a project (activating it first if needed). */
-async function saveDocsThen(root: string, paths: string[], then: () => void) {
-  if (store.get().workspace?.root !== root) await activateProject(root);
-  for (const p of paths) {
-    if (wsRoot() !== root || !(await saveFile(p))) return;
-  }
-  if (wsRoot() !== root || dirtyPathsIn(root).length) return;
-  then();
+function canCloseProject(root: string, discarded?: DiscardedDocs) {
+  const unsaved = dirtyPathsIn(root).some(
+    (p) => !discarded?.has(p) || discarded.get(p) !== editorManager.getText(root, p),
+  );
+  if (unsaved) confirmCloseProject(root);
+  return !unsaved;
 }
 
-export async function closeProject(root: string) {
-  const s = store.get();
-  if (!s.projects.some((p) => p.root === root)) return;
-  const isActive = s.workspace?.root === root;
-  if (isActive) beginSearchTransition();
+async function saveProjectThenCloseNow(root: string) {
+  if (!(await activateProjectNow(root))) return;
+  for (const path of dirtyPathsIn(root)) {
+    if (!(await saveFileNow(root, path))) return;
+  }
+  // An earlier file can be edited again while a later write is pending.
+  if (!canCloseProject(root)) return;
+  await closeProjectNow(root);
+}
+
+export function closeProject(root: string): Promise<void> {
+  const enqueue = wsRoot() === root ? withProjectTransition : withWorkspaceOwner;
+  return enqueue(() => closeProjectNow(root));
+}
+
+/** Clear the active surface while retaining parked snapshots and editor buffers. */
+function clearActiveProject() {
+  store.set({ ...freshProjectFields({ root: "", name: "" }), workspace: null, expanded: {} });
+}
+
+async function closeProjectNow(root: string, discarded?: DiscardedDocs): Promise<void> {
+  let s = store.get();
+  if (!s.projects.some((p) => p.root === root) || !canCloseProject(root, discarded)) return;
+  const wasActive = s.workspace?.root === root;
+  if (wasActive) beginSearchTransition();
   try {
-    const terms = isActive ? s.terminals : (s.projectData[root]?.terminals ?? []);
-    for (const t of terms) disposeTerm(t.seq);
-    editorManager.dropWorkspace(root);
-    // Reconcile the tab immediately. The backend only clears the active
-    // root if it still equals this project, so a late close cannot undo
-    // activation of a neighbor or resurrect another concurrently closed tab.
-    void api.closeWorkspace(root).catch(() => {});
+    if (wasActive) {
+      const idx = s.projects.findIndex((p) => p.root === root);
+      const remaining = s.projects.filter((p) => p.root !== root);
+      const next = remaining[Math.min(idx, remaining.length - 1)];
+      // Activate before closing: rejection must not retire the current editor.
+      if (next && !(await activateProjectNow(next.root))) return;
+      if (!canCloseProject(root, discarded)) return;
+      editorManager.setWorkspaceClosing(root, true);
+      if (!next) {
+        s = store.get();
+        store.set({ projectData: { ...s.projectData, [root]: takeSnapshot(s) } });
+        clearActiveProject();
+      }
+    }
 
-    const projects = s.projects.filter((p) => p.root !== root);
-    const projectData = { ...s.projectData };
-    delete projectData[root];
-
-    if (!isActive) {
-      store.set({ projects, projectData });
-      schedulePersist();
+    editorManager.setWorkspaceClosing(root, true);
+    try {
+      await api.closeWorkspace(root);
+    } catch (e) {
+      // Last-project close parked its state; a failure must restore it intact.
+      if (!store.get().workspace) commitProjectActivation(root);
+      store.set({ workspaceError: `Could not close ${root}: ${String(e)}` });
       return;
     }
 
-    // Closing the active tab: hand off to a neighbor, like a browser.
-    const idx = s.projects.findIndex((p) => p.root === root);
-    const next = projects[Math.min(idx, projects.length - 1)];
-    if (next && projectData[next.root]) {
-      const snap = projectData[next.root];
-      delete projectData[next.root];
-      try {
-        await api.activateWorkspace(next.root);
-      } catch {
-        /* may already be active */
-      }
-      store.set({
-        projects,
-        projectData,
-        ...snap,
-        search: { ...snap.search, id: 0, running: false },
-        workspaceError: null,
-      });
-      refreshAfterActivate();
-    } else {
-      // Last project closed — back to the welcome screen.
-      store.set({
-        projects,
-        projectData,
-        workspace: null,
-        tabs: [],
-        activeTab: null,
-        docs: {},
-        expanded: {},
-        dirInvalidations: {},
-        revealRequest: null,
-        git: { isRepo: false, branch: null, changes: [] },
-        activity: [],
-        followBurst: 0,
-        terminals: [],
-        activeTerminal: null,
-        sessions: [],
-        collisions: [],
-        worktrees: [],
-        checkpoints: [],
-        review: {},
-        mergeReadiness: [],
-        fileIndex: null,
-        fileIndexTruncated: false,
-        search: {
-          id: 0,
-          query: "",
-          caseSensitive: false,
-          regex: false,
-          matches: [],
-          running: false,
-          truncated: false,
-          error: null,
-        },
-        cursor: null,
-        workspaceError: null,
-      });
-    }
+    // The closed project is no longer editable. Drop only its live snapshot;
+    // never replace other projects with a collection captured before an await.
+    s = store.get();
+    const fields = s.projectData[root];
+    for (const t of fields?.terminals ?? []) disposeTerm(t.seq);
+    editorManager.dropWorkspace(root);
+    const projectData = { ...s.projectData };
+    delete projectData[root];
+    store.set({ projects: s.projects.filter((p) => p.root !== root), projectData });
     markUserAction();
     schedulePersist();
   } finally {
-    if (isActive) searchTransitions -= 1;
+    editorManager.setWorkspaceClosing(root, false);
+    if (wasActive) searchTransitions -= 1;
   }
 }
 
-/** Close every project except `root` (activates it first). */
-export async function closeOtherProjects(root: string) {
-  const s = store.get();
-  if (!s.projects.some((p) => p.root === root)) return;
-  if (s.workspace?.root !== root) await activateProject(root);
-  for (const p of [...store.get().projects]) {
-    if (p.root !== root) await closeProject(p.root);
-  }
-}
-
-/** Close every project tab — ends at the welcome screen. */
-export async function closeAllProjects() {
-  for (const p of [...store.get().projects]) {
-    // requestCloseProject would prompt per project; closing is explicit
-    // here so go through the dirty-check once for the whole batch.
-    if (dirtyPathsIn(p.root).length) {
-      requestCloseProject(p.root);
-      return; // let the user resolve dirty projects one at a time
+/** Close every project except `root`, retaining dirty projects for confirmation. */
+export function closeOtherProjects(root: string): Promise<void> {
+  return withWorkspaceOwner(async () => {
+    if (!(await activateProjectNow(root))) return;
+    for (const p of [...store.get().projects]) {
+      if (p.root === root) continue;
+      await closeProjectNow(p.root);
+      if (store.get().projects.some((project) => project.root === p.root)) return;
     }
-    await closeProject(p.root);
-  }
+  });
+}
+
+/** Close every project tab, stopping for unsaved changes or a backend failure. */
+export function closeAllProjects(): Promise<void> {
+  return withWorkspaceOwner(async () => {
+    for (const p of [...store.get().projects]) {
+      await closeProjectNow(p.root);
+      if (store.get().projects.some((project) => project.root === p.root)) return;
+    }
+  });
 }
 
 function dirtyPathsIn(root: string): string[] {
@@ -659,21 +681,36 @@ export function resolveConfirm() {
 
 // ---------- tabs / documents ----------
 
-export async function openFile(path: string, opts?: { line?: number; col?: number }) {
-  const key = fileKey(path);
-  const s = store.get();
-  const root = s.workspace?.root;
-  if (!root) return;
-  if (!s.tabs.some((t) => t.key === key)) {
-    store.set({ tabs: [...s.tabs, { key, kind: "file", path, title: baseName(path) }] });
-  }
-  if (s.activeTab !== key) store.set({ activeTab: key });
-  if (opts?.line) editorManager.queueJump(root, path, opts.line, opts.col);
+export function openFile(path: string, opts?: { line?: number; col?: number }): Promise<void> {
+  const root = wsRoot();
+  return withWorkspaceOwner(async () => {
+    if (!root || wsRoot() !== root) return;
+    const key = fileKey(path);
+    const s = store.get();
+    if (!s.tabs.some((t) => t.key === key)) {
+      store.set({ tabs: [...s.tabs, { key, kind: "file", path, title: baseName(path) }] });
+    }
+    if (s.activeTab !== key) store.set({ activeTab: key });
+    if (opts?.line) editorManager.queueJump(root, path, opts.line, opts.col);
+    await ensureFileLoadedNow(root, path);
+    touchRecent(path);
+    markUserAction();
+    schedulePersist();
+  });
+}
 
+/** Editor mounts use the same ownership barrier as open/save and project switches. */
+export function ensureFileLoaded(root: string, path: string): Promise<boolean> {
+  return withWorkspaceOwner(() => ensureFileLoadedNow(root, path));
+}
+
+async function ensureFileLoadedNow(root: string, path: string): Promise<boolean> {
+  const s = store.get();
+  if (wsRoot() !== root || !s.tabs.some((t) => t.kind === "file" && t.path === path)) return false;
   if (!s.docs[path]) {
     store.set({
       docs: {
-        ...store.get().docs,
+        ...s.docs,
         [path]: {
           dirty: false,
           editable: false,
@@ -686,15 +723,18 @@ export async function openFile(path: string, opts?: { line?: number; col?: numbe
         },
       },
     });
-    const res = await editorManager.loadDoc(root, path);
-    if (res) {
-      const d = store.get().docs[path] ?? {};
-      store.set({ docs: { ...store.get().docs, [path]: { ...d, ...res.meta } as DocMetaT } });
-    }
   }
-  touchRecent(path);
-  markUserAction();
-  schedulePersist();
+  const res = await editorManager.loadDoc(root, path);
+  // A tab can be closed while its read is pending without switching projects.
+  if (!store.get().docs[path]) {
+    editorManager.drop(root, path);
+    return false;
+  }
+  if (res) {
+    const d = store.get().docs[path];
+    store.set({ docs: { ...store.get().docs, [path]: { ...d, ...res.meta } as DocMetaT } });
+  }
+  return true;
 }
 
 type DocMetaT = AppState["docs"][string];
@@ -757,7 +797,10 @@ export function requestCloseTabs(keys: string[]) {
       {
         label: "Don't Save",
         kind: "danger",
-        onPick: () => closeTabsNow(keys),
+        onPick: () => {
+          // Project shortcuts can navigate while this confirmation is open.
+          if (wsRoot() === s.workspace?.root) closeTabsNow(keys);
+        },
       },
       {
         label: dirty.length === 1 ? "Save & Close" : "Save All & Close",
@@ -816,18 +859,29 @@ export function nextTab(dir = 1) {
   markUserAction();
 }
 
-export function markDocDirty(path: string, dirty: boolean) {
-  const d = store.get().docs[path];
+export function markDocDirty(path: string, dirty: boolean, root = wsRoot()) {
+  const s = store.get();
+  const fields = root === wsRoot() ? s : s.projectData[root];
+  const d = fields?.docs[path];
   if (!d || d.dirty === dirty) return;
-  store.set({ docs: { ...store.get().docs, [path]: { ...d, dirty } } });
+  const docs = { ...fields.docs, [path]: { ...d, dirty } };
+  if (root === wsRoot()) store.set({ docs });
+  else store.set({ projectData: { ...s.projectData, [root]: { ...s.projectData[root], docs } } });
 }
 
 /** True only when the current buffer was saved and is safe to close. */
-export async function saveFile(path?: string): Promise<boolean> {
-  const s = store.get();
-  const root = s.workspace?.root;
+export function saveFile(path?: string): Promise<boolean> {
+  const root = wsRoot();
   const p = path ?? activeFilePath();
-  if (!p || !root) return false;
+  return withWorkspaceOwner(async () => {
+    if (!root || !p || wsRoot() !== root) return false;
+    return saveFileNow(root, p);
+  });
+}
+
+async function saveFileNow(root: string, p: string): Promise<boolean> {
+  if (wsRoot() !== root) return false;
+  const s = store.get();
   const text = editorManager.getText(root, p);
   if (text === null) return false;
   const doc = s.docs[p];
@@ -871,10 +925,50 @@ export function toggleEditMode(path?: string) {
   markUserAction();
 }
 
-export async function reloadFile(path?: string) {
+export function reloadFile(path?: string): Promise<void> {
   const p = path ?? activeFilePath();
   const root = wsRoot();
-  if (!p || !root) return;
+  // Explicit Reload / Discard mine approves only the buffer visible now.
+  const discardedText = p && root ? editorManager.getText(root, p) : null;
+  return withWorkspaceOwner(async () => {
+    if (!p || !root || wsRoot() !== root) return;
+    await reloadFileNow(root, p, { discardedText });
+  });
+}
+
+async function reloadFileNow(
+  root: string,
+  p: string,
+  options: { discardedText?: string | null; externalChange?: boolean } = {},
+) {
+  const s = store.get();
+  const { discardedText, externalChange } = options;
+  if (wsRoot() !== root) {
+    // A switch can overtake an fs-triggered reload. Preserve its warning on
+    // the dirty owner without reading through another project's backend root.
+    const snap = s.projectData[root];
+    const doc = snap?.docs[p];
+    if (externalChange && doc?.dirty) {
+      store.set({
+        projectData: {
+          ...s.projectData,
+          [root]: {
+            ...snap,
+            docs: { ...snap.docs, [p]: { ...doc, conflict: true } },
+          },
+        },
+      });
+    }
+    return;
+  }
+  const doc = s.docs[p];
+  if (!doc) return;
+  if (discardedText === undefined ? doc.dirty : editorManager.getText(root, p) !== discardedText) {
+    if (externalChange) {
+      store.set({ docs: { ...store.get().docs, [p]: { ...doc, conflict: true } } });
+    }
+    return;
+  }
   const res = await editorManager.reloadFromDisk(root, p, false);
   const d = store.get().docs[p];
   if (res.status === "reloaded" && d) {
@@ -891,6 +985,8 @@ export async function reloadFile(path?: string) {
         },
       },
     });
+  } else if (res.status === "conflict" && d) {
+    store.set({ docs: { ...store.get().docs, [p]: { ...d, conflict: true } } });
   } else if (res.status === "gone" && d) {
     store.set({
       docs: { ...store.get().docs, [p]: { ...d, deletedOnDisk: true } },
@@ -1013,28 +1109,8 @@ function applyFsBatchActive(changes: FsChange[]) {
         } else if (d.dirty) {
           docs[c.path] = { ...d, conflict: true };
         } else {
-          // fire-and-forget reload; reloadFromDisk guards against races
-          void editorManager.reloadFromDisk(root, c.path, false).then((r) => {
-            const cur = store.get().docs[c.path];
-            if (!cur) return;
-            if (r.status === "reloaded") {
-              store.set({
-                docs: {
-                  ...store.get().docs,
-                  [c.path]: {
-                    ...cur,
-                    conflict: false,
-                    deletedOnDisk: false,
-                    mtimeMs: r.mtimeMs ?? cur.mtimeMs,
-                  },
-                },
-              });
-            } else if (r.status === "gone") {
-              store.set({
-                docs: { ...store.get().docs, [c.path]: { ...cur, deletedOnDisk: true } },
-              });
-            }
-          });
+          // The document's project may switch before the queued read starts.
+          void withWorkspaceOwner(() => reloadFileNow(root, c.path, { externalChange: true }));
         }
       }
     } else if (c.kind === "deleted") {
