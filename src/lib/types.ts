@@ -43,6 +43,7 @@ export interface FsBatch {
 /** git:stale payload. */
 export interface GitStaleEvent {
   root: string;
+  metadata?: boolean;
 }
 
 export interface GitChange {
@@ -55,6 +56,7 @@ export interface GitChange {
 
 export interface GitStatus {
   isRepo: boolean;
+  head?: string | null;
   branch?: string | null;
   changes: GitChange[];
 }
@@ -415,4 +417,14 @@ export interface UpdateState extends UpdateInfo {
   total?: number;
   error?: string;
   dismissed?: boolean;
+}
+
+/** A bounded, root-bound snapshot of one exact comparison. */
+export interface ReviewDiff {
+  workspaceRoot: string;
+  path: string;
+  staged: boolean;
+  patch: string;
+  fingerprint: string | null;
+  unavailableReason: string | null;
 }

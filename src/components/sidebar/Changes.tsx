@@ -11,6 +11,7 @@ import {
   createCheckpoint,
 } from "../../state/actions";
 import { REVIEW_LABEL, REVIEW_RISKY_RANK } from "../../lib/agents";
+import { changeComparisons, reviewKey } from "../../lib/review-progress";
 import type { GitChange } from "../../lib/types";
 
 interface Item {
@@ -34,6 +35,31 @@ export function Changes() {
   const git = useStore(store, (s) => s.git, shallow);
   const workspace = useStore(store, (s) => s.workspace);
   const review = useStore(store, (s) => s.review, shallow);
+  const humanReviews = useStore(store, (s) => s.humanReviews);
+  const verified = useStore(store, (s) => s.humanReviewVerified);
+  const saveError = useStore(store, (s) => s.humanReviewSaveError);
+  const staleList = useStore(store, (s) => !!s.gitStatusStaleRoots[s.workspace?.root ?? ""]);
+  const [unreviewedOnly, setUnreviewedOnly] = useState(false);
+  const reviewedKeys = useMemo(
+    () =>
+      new Set(
+        (staleList ? [] : humanReviews)
+          .filter((r) => verified[reviewKey(r.workspaceRoot, r.path, r.staged)] === r.fingerprint)
+          .map((r) => reviewKey(r.workspaceRoot, r.path, r.staged)),
+      ),
+    [humanReviews, verified, staleList],
+  );
+  const comparisons = changeComparisons(git.changes);
+  const reviewedCount = comparisons.filter(({ change, staged }) =>
+    reviewedKeys.has(reviewKey(workspace?.root ?? "", change.path, staged)),
+  ).length;
+  const pendingCount = comparisons.filter(({ change, staged }) => {
+    const key = reviewKey(workspace?.root ?? "", change.path, staged);
+    return (
+      !reviewedKeys.has(key) &&
+      humanReviews.some((r) => reviewKey(r.workspaceRoot, r.path, r.staged) === key)
+    );
+  }).length;
   const [message, setMessage] = useState("");
   const [commitError, setCommitError] = useState<string | null>(null);
   const [committing, setCommitting] = useState(false);
@@ -45,26 +71,30 @@ export function Changes() {
     const untracked: Group = { title: "Untracked", items: [] };
     for (const c of git.changes) {
       if (riskyOnly && (review[c.path]?.rank ?? 0) <= REVIEW_RISKY_RANK) continue;
+      const isVisible = (staged: boolean) =>
+        !unreviewedOnly || !reviewedKeys.has(reviewKey(workspace?.root ?? "", c.path, staged));
       if (c.untracked) {
-        untracked.items.push({ change: c, staged: false });
+        if (isVisible(false)) untracked.items.push({ change: c, staged: false });
         continue;
       }
-      if (c.index !== ".") staged.items.push({ change: c, staged: true });
-      if (c.worktree !== ".") unstaged.items.push({ change: c, staged: false });
+      if (c.index !== "." && isVisible(true)) staged.items.push({ change: c, staged: true });
+      if (c.worktree !== "." && isVisible(false)) unstaged.items.push({ change: c, staged: false });
     }
     return [staged, unstaged, untracked].filter((g) => g.items.length > 0);
-  }, [git.changes, review, riskyOnly]);
+  }, [git.changes, review, riskyOnly, unreviewedOnly, reviewedKeys, workspace?.root]);
 
   const riskyCount = git.changes.filter(
     (c) => (review[c.path]?.rank ?? 0) > REVIEW_RISKY_RANK,
   ).length;
 
-  const stagedGroup = groups.find((g) => g.title === "Staged");
-  const stagedPaths = stagedGroup?.items.map((i) => i.change.path) ?? [];
+  const stagedPaths = comparisons.filter((i) => i.staged).map((i) => i.change.path);
+  const canMutateList = () =>
+    store.get().workspace?.root === workspace?.root &&
+    !store.get().gitStatusStaleRoots[workspace?.root ?? ""];
 
   const commit = async () => {
     const msg = message.trim();
-    if (!msg || committing) return;
+    if (!msg || committing || !canMutateList()) return;
     markUserAction();
     setCommitting(true);
     setCommitError(null);
@@ -78,13 +108,27 @@ export function Changes() {
     const paths = g.items.map((i) => i.change.path);
     if (g.title === "Staged") {
       return (
-        <button className="mini-btn" title="Unstage all" onClick={() => void unstagePaths(paths)}>
+        <button
+          className="mini-btn"
+          title="Unstage all"
+          disabled={staleList}
+          onClick={() => {
+            if (canMutateList()) void unstagePaths(paths);
+          }}
+        >
           − all
         </button>
       );
     }
     return (
-      <button className="mini-btn" title="Stage all" onClick={() => void stagePaths(paths)}>
+      <button
+        className="mini-btn"
+        title="Stage all"
+        disabled={staleList}
+        onClick={() => {
+          if (canMutateList()) void stagePaths(paths);
+        }}
+      >
         + all
       </button>
     );
@@ -92,22 +136,26 @@ export function Changes() {
 
   if (!workspace) return null;
 
-  if (!git.isRepo) {
+  if (!git.isRepo && !staleList) {
     return <div className="empty-hint pad">not a git repository</div>;
   }
 
   return (
     <div className="changes">
       <div className="panel-subhead">
-        <span className="dim">⎇ {git.branch ?? "detached"}</span>
+        <span className="dim">
+          ⎇ {git.branch ?? "detached"}
+          {staleList ? " (last loaded)" : ""}
+        </span>
         <span className="spacer" />
         {riskyCount > 0 && (
           <button
             className={`mini-btn ${riskyOnly ? "primary" : ""}`}
             title="Show only files flagged by the deterministic review classifier"
+            aria-pressed={riskyOnly}
             onClick={() => setRiskyOnly((x) => !x)}
           >
-            review {riskyCount}
+            risk {riskyCount}
           </button>
         )}
         <button
@@ -128,6 +176,44 @@ export function Changes() {
           ⟳
         </button>
       </div>
+      <div className="review-progress">
+        {staleList && (
+          <div role="status">
+            Change list needs verification. Refresh the list to see current staged and worktree
+            entries.
+          </div>
+        )}
+        {saveError && (
+          <div role="alert">
+            Review progress could not be saved. It remains available in this session.
+          </div>
+        )}
+        <div role="status">
+          {staleList
+            ? "Review progress awaits a refreshed change list"
+            : `Reviewed ${reviewedCount} / ${comparisons.length} changes`}
+        </div>
+        {!staleList && (
+          <progress
+            aria-label="Human review progress"
+            max={Math.max(1, comparisons.length)}
+            value={reviewedCount}
+          />
+        )}
+        <button
+          className="mini-btn"
+          aria-pressed={unreviewedOnly}
+          onClick={() => setUnreviewedOnly((value) => !value)}
+        >
+          Unreviewed only
+        </button>
+        {pendingCount > 0 && !staleList && (
+          <div className="dim">
+            {pendingCount} saved review{pendingCount === 1 ? "" : "s"} need verification. Open each
+            diff to check its current content.
+          </div>
+        )}
+      </div>
       <div className="commit-box">
         <input
           className="commit-input"
@@ -140,15 +226,17 @@ export function Changes() {
           onKeyDown={(e) => {
             if (e.key === "Enter") void commit();
           }}
-          disabled={stagedPaths.length === 0}
+          disabled={staleList || stagedPaths.length === 0}
         />
         <button
           className="mini-btn commit-btn"
-          disabled={stagedPaths.length === 0 || !message.trim() || committing}
+          disabled={staleList || stagedPaths.length === 0 || !message.trim() || committing}
           title={
-            stagedPaths.length === 0
-              ? "Stage changes first"
-              : `Commit ${stagedPaths.length} staged file${stagedPaths.length === 1 ? "" : "s"}`
+            staleList
+              ? "Refresh the change list first"
+              : stagedPaths.length === 0
+                ? "Stage changes first"
+                : `Commit ${stagedPaths.length} staged file${stagedPaths.length === 1 ? "" : "s"}`
           }
           onClick={() => void commit()}
         >
@@ -156,7 +244,15 @@ export function Changes() {
         </button>
       </div>
       {commitError && <div className="banner err commit-error">{commitError}</div>}
-      {groups.length === 0 && <div className="empty-hint pad">working tree clean</div>}
+      {groups.length === 0 && (
+        <div className="empty-hint pad">
+          {staleList
+            ? "Refresh to load current changes"
+            : git.changes.length === 0
+              ? "working tree clean"
+              : "No changes match these filters"}
+        </div>
+      )}
       {groups.map((g) => (
         <div key={g.title} className="change-group">
           <div className="change-group-title">
@@ -171,6 +267,7 @@ export function Changes() {
               ? change.path.slice(0, change.path.lastIndexOf("/") + 1)
               : "";
             const name = change.path.slice(dir.length);
+            const reviewed = reviewedKeys.has(reviewKey(workspace.root, change.path, staged));
             const r = review[change.path];
             const rlabel = r ? REVIEW_LABEL[r.category] : undefined;
             return (
@@ -180,13 +277,17 @@ export function Changes() {
                   onClick={() => openDiff(change.path, staged, change.untracked)}
                   title={
                     (change.origPath ? `${change.origPath} → ${change.path}` : change.path) +
-                    (r?.reasons.length ? `\nreview: ${r.reasons.join(", ")}` : "")
+                    (r?.reasons.length ? `\nrisk: ${r.reasons.join(", ")}` : "") +
+                    `\n${reviewed ? "Reviewed by you" : "Unreviewed"} · ${staged ? "staged" : "worktree"}`
                   }
                 >
                   <span className={`git-badge git-${l === "?" ? "u" : l}`}>{l}</span>
                   <span className="change-path">
                     <span className="dim">{dir}</span>
                     {name}
+                  </span>
+                  <span className={`human-review-badge ${reviewed ? "done" : ""}`}>
+                    {reviewed ? "reviewed" : "unreviewed"}
                   </span>
                   {rlabel && r.category !== "code" && (
                     <span className={`review-badge r-${r.category}`}>{rlabel}</span>
@@ -195,8 +296,10 @@ export function Changes() {
                 <button
                   className="icon-btn row-action"
                   title={staged ? "Unstage" : "Stage"}
+                  disabled={staleList}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (!canMutateList()) return;
                     if (staged) void unstagePaths([change.path]);
                     else void stagePaths([change.path]);
                   }}

@@ -8,6 +8,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Explicit, content-bound human review progress with Mark reviewed / Undo,
+  separate staged/worktree counts, and an Unreviewed filter. Bounded local
+  metadata restores as unverified until current content is checked; file and
+  Git metadata changes invalidate confirmations. Incomplete or unsupported
+  diffs cannot be marked. Diff/status requests now reject stale cross-project
+  results, and hunk source lines resembling file headers render correctly.
 - **Embedded ripgrep fallback**: on hosts without `rg` (the common Windows
   case), workspace search now runs the actual ripgrep engine — `grep-regex`
   + `grep-searcher`, the crates ripgrep itself is built on — over the

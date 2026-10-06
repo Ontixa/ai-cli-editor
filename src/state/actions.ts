@@ -9,6 +9,8 @@
  * browser-tab semantics (terminals, undo history, explorer state survive).
  */
 
+import { sanitizeHumanReviews } from "../lib/review-progress";
+import { invalidateAllHumanReviews, invalidateHumanReviews } from "./review-progress";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { store, type AppState, type ProjectSnapshot, type Tab, type TerminalSession } from "./app";
 import {
@@ -64,17 +66,19 @@ const wsRoot = () => store.get().workspace?.root ?? "";
 // ---------- boot / persistence ----------
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let reportingPersistResult = false;
 
 function schedulePersist() {
-  if (!inTauri()) return;
+  if (!inTauri() || reportingPersistResult) return;
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(persistNow, 900);
 }
 
 function persistNow() {
   const s = store.get();
-  void api.saveState({
+  const write = api.saveState({
     version: 2,
+    humanReviews: sanitizeHumanReviews(s.humanReviews),
     projects: s.projects.map((p) => {
       const f = p.root === s.workspace?.root ? takeSnapshot(s) : s.projectData[p.root];
       return {
@@ -97,6 +101,17 @@ function persistNow() {
     recentFiles: s.recentFiles.slice(0, 20),
     recentProjects: s.recentProjects.slice(0, 12),
   });
+  const report = (humanReviewSaveError: boolean) => {
+    if (store.get().humanReviewSaveError === humanReviewSaveError) return;
+    // Reporting the result must not schedule an automatic retry loop.
+    reportingPersistResult = true;
+    store.set({ humanReviewSaveError });
+    reportingPersistResult = false;
+  };
+  void write.then(
+    () => report(false),
+    () => report(true),
+  );
 }
 
 interface PersistedProject {
@@ -143,6 +158,8 @@ async function bootNow() {
 
 function restoreGlobalPrefs(restored: Record<string, unknown>) {
   store.set({
+    humanReviews: sanitizeHumanReviews(restored.humanReviews),
+    humanReviewVerified: {},
     sidebarVisible: restored.sidebarVisible !== false,
     sidebarTab: (restored.sidebarTab as AppState["sidebarTab"]) ?? "files",
     sidebarWidth: Number(restored.sidebarWidth) || 264,
@@ -415,6 +432,7 @@ export function openWorkspacePath(path: string): Promise<void> {
 }
 
 function withProjectTransition<T>(operation: () => Promise<T>): Promise<T> {
+  invalidateHumanReviews(wsRoot(), undefined, false);
   beginSearchTransition();
   return withWorkspaceOwner(async () => {
     try {
@@ -886,6 +904,7 @@ async function saveFileNow(root: string, p: string): Promise<boolean> {
   if (text === null) return false;
   const doc = s.docs[p];
   if (doc && !doc.editable && !doc.dirty) return true;
+  invalidateHumanReviews(root, [p]);
   editorManager.markSelfWrite(root, p);
   try {
     const res = await api.writeFile(p, text);
@@ -1007,6 +1026,10 @@ const recentExternal = new Map<string, number>();
 let gitRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function applyFsBatch(batch: FsBatch) {
+  invalidateHumanReviews(
+    batch.root,
+    batch.changes.flatMap((c) => (c.oldPath ? [c.path, c.oldPath] : [c.path])),
+  );
   const s = store.get();
   if (batch.root === s.workspace?.root) {
     applyFsBatchActive(batch.changes);
@@ -1184,52 +1207,85 @@ export function markUserAction() {
 
 // ---------- git ----------
 
-export async function refreshGit() {
-  if (!store.get().workspace) return;
+let gitRequest = 0;
+
+export async function refreshGit(revalidate = true) {
+  const root = wsRoot();
+  if (!root) return;
+  // Cached entries cannot drive progress or mutations while a replacement
+  // read is pending. Only an owned successful result makes this list current.
+  store.set((s) => ({ gitStatusStaleRoots: { ...s.gitStatusStaleRoots, [root]: true } }));
+  if (revalidate) invalidateHumanReviews(root, undefined, false);
+  const request = ++gitRequest;
+  const version = store.get().humanReviewVersion;
+  const owned = () =>
+    request === gitRequest && wsRoot() === root && store.get().humanReviewVersion === version;
   try {
-    const git = await api.gitStatus();
-    // The user may have switched projects mid-flight — only apply if the
-    // workspace is still the one we queried.
-    if (!store.get().workspace) return;
-    store.set({ git });
-    void refreshReview(git.changes.length);
+    const git = await api.gitStatus(root);
+    if (!owned()) return;
+    const previous = store.get().git;
+    if (previous.isRepo && (previous.head !== git.head || previous.branch !== git.branch)) {
+      invalidateHumanReviews(root);
+    } else {
+      const before = new Map(previous.changes.map((c) => [c.path, JSON.stringify(c)]));
+      const after = new Map(git.changes.map((c) => [c.path, JSON.stringify(c)]));
+      const changed = [...new Set([...before.keys(), ...after.keys()])].filter(
+        (path) => before.get(path) !== after.get(path),
+      );
+      // Initial restored status has no baseline; candidates still need a fresh
+      // snapshot. For an observed transition, never revive an older marker.
+      if (previous.isRepo && changed.length) invalidateHumanReviews(root, changed);
+    }
+    const gitStatusStaleRoots = { ...store.get().gitStatusStaleRoots };
+    delete gitStatusStaleRoots[root];
+    store.set({ git, gitStatusStaleRoots });
+    void refreshReview(git.changes.length, root, request, store.get().humanReviewVersion);
   } catch {
-    /* not a repo or git missing */
+    if (owned()) {
+      // The list stays unknown after failure; old confirmations are not current.
+      invalidateHumanReviews(root, undefined, false);
+      store.set({ review: {} });
+    }
   }
 }
 
-/** Re-classify changed files. Skipped for very large changesets where
- *  fetching every patch would be wasteful — badges just stay stale. */
-async function refreshReview(changeCount: number) {
-  if (changeCount === 0) {
-    if (Object.keys(store.get().review).length) store.set({ review: {} });
+/** Risk classification is separate from explicit human confirmation. */
+async function refreshReview(changeCount: number, root: string, request: number, version: number) {
+  const owned = () =>
+    request === gitRequest && wsRoot() === root && store.get().humanReviewVersion === version;
+  if (!owned()) return;
+  if (changeCount === 0 || changeCount > 150) {
+    store.set({ review: {} });
     return;
   }
-  if (changeCount > 150) return;
   try {
-    const files = await api.reviewSummaries();
+    const files = await api.reviewSummaries(root);
+    if (!owned()) return;
     const review: Record<string, (typeof files)[number]> = {};
     for (const f of files) review[f.path] = f;
     store.set({ review });
   } catch {
-    /* review is advisory — never block git refresh */
+    /* Classification is advisory. */
   }
 }
 
 export async function stagePaths(paths: string[]) {
   if (!paths.length) return;
+  invalidateHumanReviews(wsRoot());
   await api.gitStage(paths).catch(() => {});
   void refreshGit();
 }
 
 export async function unstagePaths(paths: string[]) {
   if (!paths.length) return;
+  invalidateHumanReviews(wsRoot());
   await api.gitUnstage(paths).catch(() => {});
   void refreshGit();
 }
 
 /** Commit the staged index. Returns an error string or null on success. */
 export async function commitStaged(message: string): Promise<string | null> {
+  invalidateHumanReviews(wsRoot());
   try {
     await api.gitCommit(message);
     void refreshGit();
@@ -1243,7 +1299,25 @@ export async function commitStaged(message: string): Promise<string | null> {
 
 export function scheduleGitRefresh() {
   if (gitRefreshTimer) clearTimeout(gitRefreshTimer);
-  gitRefreshTimer = setTimeout(refreshGit, 350);
+  gitRefreshTimer = setTimeout(() => void refreshGit(false), 350);
+}
+
+/** New metadata events only invalidate/reload the bounded selected snapshot.
+ * The existing file-event and explicit refresh paths retain their behavior. */
+export function applyGitStale(root: string, metadata: boolean) {
+  if (metadata) {
+    invalidateHumanReviews(root);
+    if (wsRoot() === root || store.get().projects.some((p) => p.root === root)) {
+      store.set((s) => ({ gitStatusStaleRoots: { ...s.gitStatusStaleRoots, [root]: true } }));
+    }
+    return;
+  }
+  if (root === wsRoot()) scheduleGitRefresh();
+}
+
+export function revalidateReviewOnFocus() {
+  const root = wsRoot();
+  if (root) invalidateHumanReviews(root, undefined, false);
 }
 
 export function openDiff(path: string, staged: boolean, untracked: boolean) {
@@ -1597,8 +1671,10 @@ export function setExcludesOpen(open: boolean) {
 export async function saveWatchExcludes(text: string): Promise<string | null> {
   const { patterns, errors } = parseWatchExcludes(text);
   if (errors.length) return errors.join("\n");
+  invalidateAllHumanReviews();
   try {
     const applied = await api.setWatchExcludes(patterns);
+    invalidateAllHumanReviews();
     store.set({ watchExcludes: applied, fileIndex: null });
     if (store.get().workspace) void ensureFileIndex();
     schedulePersist();
@@ -1925,6 +2001,7 @@ export async function checkpointPlan(id: string): Promise<RestorePlan | null> {
 
 /** Returns warnings/errors as a string, or null on clean restore. */
 export async function restoreCheckpoint(id: string, force: boolean): Promise<string | null> {
+  invalidateHumanReviews(wsRoot());
   try {
     const res = await api.checkpointRestore(id, force);
     await refreshCheckpoints();
@@ -1953,12 +2030,13 @@ export function setupBackendListeners() {
   if (wired || !inTauri()) return;
   wired = true;
   void onFsBatch(applyFsBatch);
-  void onGitStale((root) => {
-    if (root === store.get().workspace?.root) scheduleGitRefresh();
-  });
+  void onGitStale(applyGitStale);
   void onSearchChunk(applySearchEvent);
   void onSearchDone(applySearchEvent);
   void onSessionUpdate(applySessions);
+  if (typeof window !== "undefined") {
+    window.addEventListener("focus", revalidateReviewOnFocus);
+  }
   // Initial fetch in case the workspace was opened before wiring ran.
   void api
     .sessionList()
@@ -2065,6 +2143,7 @@ function joinRel(dir: string, name: string): string {
 /** Returns an error string or null on success. */
 export async function fsCreateFile(dir: string, name: string): Promise<string | null> {
   const rel = joinRel(dir, name.trim());
+  invalidateHumanReviews(wsRoot(), [rel]);
   try {
     await api.createFile(rel);
     invalidateDir(dir);
@@ -2090,6 +2169,7 @@ export async function fsCreateDir(dir: string, name: string): Promise<string | n
 export async function fsRename(path: string, newName: string): Promise<string | null> {
   const to = joinRel(parentOf(path), newName.trim());
   if (to === path) return null;
+  invalidateHumanReviews(wsRoot(), [path, to]);
   try {
     await api.renamePath(path, to);
     const dir = parentOf(path);
@@ -2104,6 +2184,7 @@ export async function fsRename(path: string, newName: string): Promise<string | 
 }
 
 export async function fsDelete(path: string): Promise<string | null> {
+  invalidateHumanReviews(wsRoot(), [path]);
   try {
     await api.deletePath(path);
     invalidateDir(parentOf(path));
