@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "../lib/ipc";
 import { initialState, store } from "./app";
-import { boot, openWorkspacePath } from "./actions";
+import { boot, openWorkspacePath, setDiffMode } from "./actions";
 
 vi.mock("../lib/ipc", () => ({
   inTauri: () => true,
@@ -100,4 +100,54 @@ it("restores a v1 workspace without recursively waiting on the transition queue"
   expect(store.get().activeTab).toBe(tab.key);
   await openWorkspacePath("/b");
   expect(backendRoot).toBe("/b");
+});
+
+it("restores and persists bounded review metadata without restoring verification or source", async () => {
+  const marker = {
+    workspaceRoot: "/a",
+    path: "notes.txt",
+    staged: false,
+    fingerprint: "a".repeat(64),
+    reviewedAt: 1,
+  };
+  vi.mocked(api.loadState).mockResolvedValueOnce({
+    version: 2,
+    projects: [{ root: "/a" }],
+    activeProject: "/a",
+    humanReviews: [
+      { ...marker, patch: "private source" },
+      { ...marker, path: "bad", fingerprint: "invalid" },
+    ],
+    humanReviewVerified: { fabricated: marker.fingerprint },
+  });
+  await boot();
+  expect(store.get().humanReviews).toEqual([marker]);
+  expect(store.get().humanReviewVerified).toEqual({});
+  setDiffMode("unified");
+  await vi.advanceTimersByTimeAsync(901);
+  const saved = vi.mocked(api.saveState).mock.lastCall?.[0];
+  expect(saved?.humanReviews).toEqual([marker]);
+  expect(saved).not.toHaveProperty("humanReviewVerified");
+  expect(JSON.stringify(saved)).not.toContain("private source");
+});
+
+it("keeps session review progress and reports a failed persistence write without retrying endlessly", async () => {
+  const marker = {
+    workspaceRoot: "/a",
+    path: "notes.txt",
+    staged: false,
+    fingerprint: "a".repeat(64),
+    reviewedAt: 1,
+  };
+  store.set({ humanReviews: [marker] });
+  vi.mocked(api.saveState).mockRejectedValueOnce(new Error("disk full"));
+  setDiffMode("unified");
+  await vi.advanceTimersByTimeAsync(901);
+  expect(store.get().humanReviewSaveError).toBe(true);
+  expect(store.get().humanReviews).toEqual([marker]);
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(api.saveState).toHaveBeenCalledTimes(1);
+  setDiffMode("split");
+  await vi.advanceTimersByTimeAsync(901);
+  expect(store.get().humanReviewSaveError).toBe(false);
 });

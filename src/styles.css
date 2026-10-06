@@ -2012,3 +2012,38 @@ kbd {
 :root[data-theme="light"] .split-cell.sc-del {
   background: rgba(207, 34, 46, 0.08);
 }
+
+/* Explicit human review is distinct from automatic risk classification. */
+.review-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.review-progress progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--accent);
+}
+.review-progress .dim {
+  font-size: 11px;
+}
+.diff-review-state {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.human-review-badge {
+  font-size: 10px;
+  opacity: 0.65;
+  flex-shrink: 0;
+}
+.human-review-badge.done {
+  opacity: 1;
+  color: var(--accent);
+}
+.diff-head {
+  flex-wrap: wrap;
+}

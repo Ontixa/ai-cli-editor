@@ -9,6 +9,7 @@ pub mod excludes;
 pub mod export;
 pub mod fs_ops;
 pub mod git;
+pub mod git_watcher;
 pub mod index;
 pub mod merge_readiness;
 pub mod meter;
@@ -18,6 +19,7 @@ pub mod platform;
 pub mod procmon;
 pub mod pty;
 pub mod review;
+pub mod review_diff;
 pub mod search;
 pub mod session;
 pub mod watcher;
@@ -37,6 +39,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// shared only within its own workspace.
 struct WsEntry {
     _watcher: watcher::FsWatcher,
+    git_watcher: Option<git_watcher::GitWatcher>,
     index: Arc<index::FileIndex>,
 }
 
@@ -242,10 +245,26 @@ fn open_workspace(
 
         let w = watcher::start(root.clone(), emit, Some(hook), state.excludes.clone())
             .map_err(|e| AppError::Internal(format!("watcher failed: {e}")))?;
+        let git_app = app.clone();
+        let git_root = root.clone();
+        let git_watcher = git_watcher::start(
+            &root,
+            Arc::new(move || {
+                let _ = git_app.emit(
+                    "git:stale",
+                    serde_json::json!({
+                        "root": git_root.to_string_lossy(), "metadata": true,
+                    }),
+                );
+            }),
+        )
+        .ok()
+        .flatten();
         state.workspaces.lock().unwrap().insert(
             root.clone(),
             WsEntry {
                 _watcher: w,
+                git_watcher,
                 index: Arc::new(index::FileIndex::new(state.excludes.clone())),
             },
         );
@@ -412,8 +431,58 @@ fn list_all_files(state: State<AppState>) -> AppResult<index::FileList> {
 // ---------- git ----------
 
 #[tauri::command]
-fn git_status(state: State<AppState>) -> AppResult<git::GitStatus> {
-    git::status(&state.root()?)
+fn git_status(state: State<AppState>, workspace_root: Option<String>) -> AppResult<git::GitStatus> {
+    git::status(&guarded_workspace_root(&state, workspace_root.as_deref())?)
+}
+
+/// Guard at invocation, then retain this root for the complete read. A project
+/// switch cannot redirect an in-flight request into the newly active project.
+fn guarded_workspace_root(state: &AppState, expected: Option<&str>) -> AppResult<PathBuf> {
+    let active = state.root.lock().unwrap();
+    let root = active.as_ref().ok_or(AppError::NoWorkspace)?;
+    if let Some(expected) = expected {
+        if paths::normalize(expected) != paths::normalize(&root.to_string_lossy()) {
+            return Err(AppError::InvalidInput(
+                "review workspace is no longer active".into(),
+            ));
+        }
+    }
+    Ok(root.clone())
+}
+
+#[tauri::command]
+fn review_diff(
+    state: State<AppState>,
+    workspace_root: String,
+    path: String,
+    staged: bool,
+    orig_path: Option<String>,
+) -> AppResult<review_diff::ReviewDiff> {
+    let root = guarded_workspace_root(&state, Some(&workspace_root))?;
+    let mut snapshot = review_diff::snapshot(&root, &path, staged, orig_path.as_deref());
+    let watched = state
+        .workspaces
+        .lock()
+        .unwrap()
+        .get(&root)
+        .is_some_and(|entry| {
+            entry
+                .git_watcher
+                .as_ref()
+                .is_some_and(|watcher| watcher.matches_repository(&root))
+        });
+    if !watched || state.excludes.is_excluded_path(&path) {
+        snapshot.fingerprint = None;
+        if snapshot.unavailable_reason.is_none() {
+            snapshot.unavailable_reason = Some(if watched {
+                "This path is excluded from file watching; review progress is unavailable".into()
+            } else {
+                "Git metadata is not being watched; reopen the workspace to enable review progress"
+                    .into()
+            });
+        }
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -435,7 +504,7 @@ fn git_stage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> AppR
     git::stage(&root, &paths)?;
     let _ = app.emit(
         "git:stale",
-        serde_json::json!({ "root": root.to_string_lossy() }),
+        serde_json::json!({ "root": root.to_string_lossy(), "metadata": true }),
     );
     Ok(())
 }
@@ -446,7 +515,7 @@ fn git_unstage(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> Ap
     git::unstage(&root, &paths)?;
     let _ = app.emit(
         "git:stale",
-        serde_json::json!({ "root": root.to_string_lossy() }),
+        serde_json::json!({ "root": root.to_string_lossy(), "metadata": true }),
     );
     Ok(())
 }
@@ -457,7 +526,7 @@ fn git_commit(app: AppHandle, state: State<AppState>, message: String) -> AppRes
     git::commit(&root, &message)?;
     let _ = app.emit(
         "git:stale",
-        serde_json::json!({ "root": root.to_string_lossy() }),
+        serde_json::json!({ "root": root.to_string_lossy(), "metadata": true }),
     );
     Ok(())
 }
@@ -909,8 +978,11 @@ struct ReviewedFile {
 /// Classify every changed file in the current git status. Patches are
 /// fetched per file but capped — classification stays local + fast.
 #[tauri::command]
-fn review_summaries(state: State<AppState>) -> AppResult<Vec<ReviewedFile>> {
-    let root = state.root()?;
+fn review_summaries(
+    state: State<AppState>,
+    workspace_root: Option<String>,
+) -> AppResult<Vec<ReviewedFile>> {
+    let root = guarded_workspace_root(&state, workspace_root.as_deref())?;
     let status = git::status(&root)?;
     let mut out = Vec::new();
     for change in status.changes.iter().take(200) {
@@ -993,6 +1065,7 @@ pub fn run() {
             list_all_files,
             git_status,
             git_diff,
+            review_diff,
             git_stage,
             git_unstage,
             git_commit,
@@ -1040,6 +1113,25 @@ pub fn run() {
 #[cfg(test)]
 mod search_workspace_tests {
     use super::*;
+
+    #[test]
+    fn review_reads_reject_a_missing_or_changed_workspace() {
+        let state = AppState::new();
+        assert!(matches!(
+            guarded_workspace_root(&state, Some("/work/current")),
+            Err(AppError::NoWorkspace)
+        ));
+        *state.root.lock().unwrap() = Some(PathBuf::from("/work/current"));
+        assert!(guarded_workspace_root(&state, Some("/work/old")).is_err());
+        assert_eq!(
+            guarded_workspace_root(&state, Some("/work/./current")).unwrap(),
+            PathBuf::from("/work/current")
+        );
+        assert_eq!(
+            guarded_workspace_root(&state, None).unwrap(),
+            PathBuf::from("/work/current")
+        );
+    }
 
     #[test]
     fn search_rejects_a_missing_or_changed_workspace() {

@@ -31,6 +31,8 @@ export interface ParsedDiff {
   isNew: boolean;
   isDeleted: boolean;
   isRename: boolean;
+  oldMode: string | null;
+  newMode: string | null;
   binary: boolean;
   empty: boolean;
 }
@@ -47,6 +49,8 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
     isNew: false,
     isDeleted: false,
     isRename: false,
+    oldMode: null,
+    newMode: null,
     binary: false,
     empty: true,
   };
@@ -62,6 +66,7 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
 
     if (line.startsWith("diff --git")) {
+      hunk = null;
       const m = /^diff --git a\/(.*?) b\/(.*)$/.exec(line);
       if (m) {
         out.oldPath = stripPrefix(m[1]);
@@ -71,10 +76,20 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
     }
     if (line.startsWith("new file mode")) {
       out.isNew = true;
+      out.newMode = line.slice("new file mode ".length);
       continue;
     }
     if (line.startsWith("deleted file mode")) {
       out.isDeleted = true;
+      out.oldMode = line.slice("deleted file mode ".length);
+      continue;
+    }
+    if (line.startsWith("old mode ")) {
+      out.oldMode = line.slice("old mode ".length);
+      continue;
+    }
+    if (line.startsWith("new mode ")) {
+      out.newMode = line.slice("new mode ".length);
       continue;
     }
     if (line.startsWith("rename from ")) {
@@ -93,13 +108,13 @@ export function parseUnifiedDiff(patch: string): ParsedDiff {
       out.empty = false;
       continue;
     }
-    if (line.startsWith("--- ")) {
+    if (!hunk && line.startsWith("--- ")) {
       const p = line.slice(4).trim();
       out.oldPath = p === "/dev/null" ? null : stripPrefix(p.replace(/^"|"$/g, ""));
       if (p === "/dev/null") out.isNew = true;
       continue;
     }
-    if (line.startsWith("+++ ")) {
+    if (!hunk && line.startsWith("+++ ")) {
       const p = line.slice(4).trim();
       out.newPath = p === "/dev/null" ? null : stripPrefix(p.replace(/^"|"$/g, ""));
       if (p === "/dev/null") out.isDeleted = true;

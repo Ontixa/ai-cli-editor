@@ -253,3 +253,20 @@ describe("save before closing", () => {
     expect(editorManager.getText(root, "notes.txt")).toBe("unsaved notes.txt");
   });
 });
+
+it("invalidates a review before an in-app save without depending on watcher delivery", async () => {
+  await openDirtyFiles();
+  store.set({
+    humanReviews: [
+      {
+        workspaceRoot: root,
+        path: "notes.txt",
+        staged: false,
+        fingerprint: "a".repeat(64),
+        reviewedAt: 1,
+      },
+    ],
+  });
+  expect(await saveFile("notes.txt")).toBe(true);
+  expect(store.get().humanReviews).toEqual([]);
+});

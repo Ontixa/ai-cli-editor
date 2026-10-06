@@ -34,9 +34,15 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 base64 = "0.22"
 similar = "2"
+# Stable content fingerprints; already present transitively in Cargo.lock.
+sha2 = "0.10"
 sysinfo = "0.33"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[target.'cfg(unix)'.dependencies]
+# Nonblocking, no-follow descriptor-relative review reads; already locked.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

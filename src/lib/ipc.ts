@@ -17,6 +17,7 @@ import type {
   RestorePlan,
   RestoreResult,
   ReviewedFile,
+  ReviewDiff,
   SearchChunk,
   SearchDone,
   SessionExport,
@@ -54,7 +55,13 @@ export const api = {
       col: col ?? null,
     }),
   listAllFiles: () => invoke<FileList>("list_all_files"),
-  gitStatus: () => invoke<GitStatus>("git_status"),
+  gitStatus: (workspaceRoot?: string) => invoke<GitStatus>("git_status", { workspaceRoot }),
+  reviewDiff: (
+    workspaceRoot: string,
+    path: string,
+    staged: boolean,
+    origPath: string | null = null,
+  ) => invoke<ReviewDiff>("review_diff", { workspaceRoot, path, staged, origPath }),
   gitDiff: (path: string, staged: boolean, untracked: boolean) =>
     invoke<{ path: string; staged: boolean; patch: string }>("git_diff", {
       path,
@@ -122,7 +129,8 @@ export const api = {
   checkpointRestore: (id: string, force: boolean) =>
     invoke<RestoreResult>("checkpoint_restore", { id, force }),
   checkpointDelete: (id: string) => invoke<void>("checkpoint_delete", { id }),
-  reviewSummaries: () => invoke<ReviewedFile[]>("review_summaries"),
+  reviewSummaries: (workspaceRoot?: string) =>
+    invoke<ReviewedFile[]>("review_summaries", { workspaceRoot }),
   detectAgents: () => invoke<AgentInfo[]>("detect_agents"),
   defaultShell: () => invoke<ShellSpec>("default_shell"),
   loadState: () => invoke<Record<string, unknown> | null>("load_state"),
@@ -135,8 +143,8 @@ export function onFsBatch(cb: (batch: FsBatch) => void): Promise<UnlistenFn> {
   return listen<FsBatch>("fs:batch", (e) => cb(e.payload));
 }
 
-export function onGitStale(cb: (root: string) => void): Promise<UnlistenFn> {
-  return listen<GitStaleEvent>("git:stale", (e) => cb(e.payload.root));
+export function onGitStale(cb: (root: string, metadata: boolean) => void): Promise<UnlistenFn> {
+  return listen<GitStaleEvent>("git:stale", (e) => cb(e.payload.root, e.payload.metadata === true));
 }
 
 export function onPtyOut(id: number, cb: (bytes: Uint8Array) => void): Promise<UnlistenFn> {

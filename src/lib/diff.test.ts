@@ -149,3 +149,13 @@ describe("toSplitRows", () => {
     expect(metas[0].right?.kind).toBe("meta");
   });
 });
+
+it("keeps source lines that resemble file headers inside their hunk", () => {
+  const result = parseUnifiedDiff("--- a/file\n+++ b/file\n@@ -1 +1 @@\n--- source\n+++ source\n");
+  expect(result.hunks[0].lines.map((line) => [line.kind, line.text])).toEqual([
+    ["del", "-- source"],
+    ["add", "++ source"],
+  ]);
+  expect(result.oldPath).toBe("file");
+  expect(result.newPath).toBe("file");
+});

@@ -159,6 +159,7 @@ pub fn create(repo: &Path, label: &str, session_id: Option<&str>) -> AppResult<C
     let status = git::status(repo).unwrap_or_else(|_| git::GitStatus {
         is_repo: true,
         branch: None,
+        head: None,
         changes: vec![],
     });
 
@@ -282,12 +283,14 @@ pub fn plan(repo: &Path, id: &str) -> AppResult<RestorePlan> {
         git::GitStatus {
             is_repo: false,
             branch: None,
+            head: None,
             changes: vec![],
         }
     } else {
         git::status(&checkpoint_repo).unwrap_or_else(|_| git::GitStatus {
             is_repo: true,
             branch: None,
+            head: None,
             changes: vec![],
         })
     };

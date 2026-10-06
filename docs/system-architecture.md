@@ -140,6 +140,62 @@ command runs, child processes, git summary.
   Refreshes on activation, worktree/commit mutations, and the cockpit's
   manual button — never polled.
 
+### Human review progress
+
+Human confirmations are separate from deterministic risk classification.
+`review_diff` accepts an explicit workspace root, relative path, comparison
+(`staged`) and optional original path. The backend validates ownership and
+containment, captures HEAD/index/worktree bytes, renders a diff from those
+captured bytes, and rereads the comparison context before returning it. A
+SHA-256 fingerprint binds the workspace, path, comparison, branch/HEAD, entries,
+modes and exact source bytes. Configured Git filters, external diff and textconv
+programs are not used. Mark reviewed rechecks the fingerprint before storing a
+confirmation, and request generations reject delayed results after selection,
+project or content changes.
+
+Only the open diff is loaded or checked. There is no repository-wide diff
+polling. Workspace file events remove affected confirmations, including both
+sides of renames and directory descendants. A separate selective Git metadata
+watcher observes HEAD, index and refs (including linked-worktree common refs),
+ignores object-store traffic, and invalidates workspace confirmations on Git
+context changes. These new metadata events and window-focus revalidation reload
+only the selected bounded snapshot. They do not refresh the Git change list or
+risk classification. After metadata changes, the sidebar labels its last-loaded
+list and offers Refresh. Progress totals and list-derived staging/commit
+controls stay unavailable until that list is refreshed. A pending or failed
+status read also leaves the cached list unknown; only a successful current
+request restores progress totals and list-derived controls. Existing explicit and filesystem-driven Git refreshes retain
+their normal behavior. In-app saves, renames, deletes, staging, commits and checkpoint
+restores invalidate explicitly. Focus/manual refresh clears current validation;
+background projects keep only candidates until fresh validation.
+
+`humanReviews` in the existing local `workspace-state.json` stores at most 200
+newest confirmations. Each contains workspace root, path, staged flag,
+fingerprint and timestamp; no source or diff content is persisted. Invalid
+records are dropped, and runtime verification is never restored from disk.
+Saved candidates appear as unreviewed until their diff is reopened and matches.
+Persistence failure leaves progress in the current session and displays a
+warning. The Changes counter counts staged and worktree comparisons separately;
+the Unreviewed filter includes saved candidates awaiting validation.
+
+Review snapshots are limited to 2 MiB combined input, 1 MiB patch, a 5-second
+Git deadline and a 250 ms local diff budget. Rendering is capped at 4,000 total
+diff lines; omitted or incomplete content cannot be marked reviewed. New/deleted
+file modes and renamed old/new paths are displayed alongside the comparison.
+Common staged text renames preview original HEAD content against the destination
+index; their worktree side previews the destination index against disk. Rename
+and existing-file mode-change previews remain unreviewable.
+
+Safe text previews remain available where possible for non-files reference
+storage (including reftable), watcher-excluded paths and unhealthy metadata
+watchers, while confirmation is disabled with an explicit reason. A changed
+Git directory pointer requires reopening the workspace before confirmation can
+resume. Binary/non-UTF-8 content, conflicts, symlinks, submodules, special files,
+partial/promisor clones, unsafe or oversized reads and workspaces opened below
+the repository root may have no safe text preview; those show a reason instead.
+Metadata-only/empty comparisons cannot be confirmed. This is local review
+bookkeeping, not a staging, commit or merge gate.
+
 ## State
 
 One `Store<AppState>` (immutable replace + selector subscriptions).

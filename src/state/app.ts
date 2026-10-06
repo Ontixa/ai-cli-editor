@@ -1,3 +1,4 @@
+import type { HumanReview } from "../lib/review-progress";
 import { Store } from "../lib/store";
 import type { ActivityItem } from "../lib/activity";
 import type { SessionPreset } from "../lib/presets";
@@ -126,6 +127,14 @@ export interface ConfirmState {
 }
 
 export interface AppState {
+  /** Explicit human confirmations; classification is kept separately in review. */
+  humanReviews: HumanReview[];
+  /** Ephemeral validations; never restored from disk. */
+  humanReviewVerified: Record<string, string>;
+  humanReviewVersion: number;
+  humanReviewSaveError: boolean;
+  /** Metadata invalidates review immediately; list refresh remains explicit. */
+  gitStatusStaleRoots: Record<string, boolean>;
   /** Active project — mirrors the matching entry in `projects`. */
   workspace: WorkspaceInfo | null;
   workspaceError: string | null;
@@ -251,6 +260,11 @@ const EMPTY_USAGE: UsageReport = {
 };
 
 export const initialState: AppState = {
+  humanReviews: [],
+  humanReviewVerified: {},
+  humanReviewVersion: 0,
+  humanReviewSaveError: false,
+  gitStatusStaleRoots: {},
   workspace: null,
   workspaceError: null,
   projects: [],

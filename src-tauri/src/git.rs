@@ -27,6 +27,8 @@ pub struct GitChange {
 pub struct GitStatus {
     pub is_repo: bool,
     pub branch: Option<String>,
+    /// Current commit object ID; absent in an unborn repository.
+    pub head: Option<String>,
     pub changes: Vec<GitChange>,
 }
 
@@ -58,6 +60,7 @@ pub fn parse_porcelain_v2(bytes: &[u8]) -> GitStatus {
     let text = String::from_utf8_lossy(bytes);
     let records: Vec<&str> = text.split('\0').collect();
     let mut branch = None;
+    let mut head = None;
     let mut changes = Vec::new();
     let mut i = 0;
     while i < records.len() {
@@ -69,6 +72,11 @@ pub fn parse_porcelain_v2(bytes: &[u8]) -> GitStatus {
         if rec.starts_with("# ") || rec.starts_with("#") {
             // In -z mode multiple "# ..." header lines share one NUL record.
             for line in rec.lines() {
+                if let Some(oid) = line.strip_prefix("# branch.oid ") {
+                    if oid.trim() != "(initial)" {
+                        head = Some(oid.trim().to_string());
+                    }
+                }
                 if let Some(name) = line.strip_prefix("# branch.head ") {
                     branch = Some(name.trim().to_string());
                 }
@@ -146,6 +154,7 @@ pub fn parse_porcelain_v2(bytes: &[u8]) -> GitStatus {
     GitStatus {
         is_repo: true,
         branch,
+        head,
         changes,
     }
 }
@@ -155,19 +164,25 @@ pub fn status(root: &Path) -> AppResult<GitStatus> {
         return Ok(GitStatus {
             is_repo: false,
             branch: None,
+            head: None,
             changes: vec![],
         });
     }
-    let out = git(
-        root,
-        &[
+    // Status is a read: do not refresh/write the index or launch an optional
+    // filesystem-monitor hook (metadata writes would invalidate reviews).
+    let out = Command::new("git")
+        .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
+        .arg("-C")
+        .arg(root)
+        .args([
             "status",
             "--porcelain=v2",
             "-z",
             "--branch",
             "--untracked-files=all",
-        ],
-    )?;
+        ])
+        .output()
+        .map_err(|e| AppError::Internal(format!("failed to run git: {e}")))?;
     if !out.status.success() {
         return Err(AppError::Internal(
             String::from_utf8_lossy(&out.stderr).to_string(),
@@ -298,6 +313,7 @@ mod tests {
             .collect::<Vec<u8>>();
         let st = parse_porcelain_v2(&out);
         assert_eq!(st.branch.as_deref(), Some("main"));
+        assert_eq!(st.head.as_deref(), Some("abc"));
         assert_eq!(st.changes.len(), 1);
         assert_eq!(st.changes[0].path, "src/a.rs");
         assert_eq!(st.changes[0].index, '.');
@@ -339,6 +355,13 @@ mod tests {
         let st = parse_porcelain_v2(&out);
         assert_eq!(st.changes.len(), 1);
         assert_eq!(st.changes[0].path, "conf.ts");
+    }
+
+    #[test]
+    fn parse_unborn_head_is_absent() {
+        let status = parse_porcelain_v2(b"# branch.oid (initial)\0# branch.head main\0");
+        assert_eq!(status.head, None);
+        assert_eq!(status.branch.as_deref(), Some("main"));
     }
 
     #[test]

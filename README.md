@@ -64,7 +64,14 @@ tree, a real diff — and stays fast and stable through long agent sessions.
 - **Deterministic review classification** — every changed file is tagged by
   local heuristics (no AI): `security`, `db-migration`, `ci-config`,
   `dependencies`, `tests`, `generated`, `docs`, `binary`. Badges in Changes,
-  a "review N" filter for elevated-risk files, and human-readable reasons.
+  a "risk N" filter for elevated-risk files, and human-readable reasons.
+- **Human review progress** — explicitly mark a complete text diff reviewed,
+  undo it, and filter unreviewed changes. Staged and worktree comparisons count
+  separately. Confirmations are bound to the exact content and Git context;
+  opening a diff alone never marks it reviewed. Up to 200 local metadata
+  records survive restart, but count only after reopening and verifying the
+  current diff. Observed edits, index/branch changes and checkpoint restores
+  invalidate affected confirmations. See [review limits](docs/system-architecture.md#human-review-progress).
 - **Checkpoints** — Git-native snapshots of a session's (or the workspace's)
   working tree: patch + untracked files + metadata stored under `.git/`.
   Restore is an explicit, previewed overlay — conflicting files are listed
