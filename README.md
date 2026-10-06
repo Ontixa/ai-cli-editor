@@ -217,7 +217,7 @@ quick-open · search            proc monitor (sysinfo, descendants only)
                                JSON workspace + session persistence
 ```
 
-Events are typed contracts (`fs:batch`, `pty:out:<id>`, `search:chunk`,
+Events are typed contracts (`fs:batch`, `pty:launch`, `search:chunk`,
 `search:done`, `git:stale`, `session:update`) — see
 `docs/system-architecture.md`.
 

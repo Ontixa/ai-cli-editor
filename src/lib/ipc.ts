@@ -14,6 +14,7 @@ import type {
   LinkTarget,
   MergeReadiness,
   PtyInfo,
+  PtyEvent,
   RestorePlan,
   RestoreResult,
   ReviewedFile,
@@ -78,21 +79,24 @@ export const api = {
   /** Replace the user's watch-exclude patterns; returns the normalized
    *  list the backend applied (throws on invalid patterns). */
   setWatchExcludes: (patterns: string[]) => invoke<string[]>("set_watch_excludes", { patterns }),
-  ptySpawn: (args: {
-    kind?: string;
-    program?: string;
-    args?: string[];
-    label?: string;
-    cwd?: string;
-    /** Canonical root of the owning project — required so a spawn racing
-     *  a project switch can't land in the wrong workspace. */
-    workspace?: string;
-    /** Command typed into the interactive shell right after spawn —
-     *  used for confirmed installs (shell spawns only). */
-    initCmd?: string;
-    cols: number;
-    rows: number;
-  }) => invoke<PtyInfo>("pty_spawn", { args }),
+  ptySpawn: (
+    args: {
+      kind?: string;
+      program?: string;
+      args?: string[];
+      label?: string;
+      cwd?: string;
+      /** Canonical root of the owning project — required so a spawn racing
+       *  a project switch can't land in the wrong workspace. */
+      workspace?: string;
+      /** Command typed into the interactive shell right after spawn —
+       *  used for confirmed installs (shell spawns only). */
+      initCmd?: string;
+      cols: number;
+      rows: number;
+    },
+    launchId: string,
+  ) => invoke<PtyInfo>("pty_spawn", { args, launchId }),
   ptyWrite: (id: number, data: string) => invoke<void>("pty_write", { id, data }),
   ptyWriteBytes: (id: number, data: number[]) => invoke<void>("pty_write_bytes", { id, data }),
   ptyResize: (id: number, cols: number, rows: number) =>
@@ -147,12 +151,9 @@ export function onGitStale(cb: (root: string, metadata: boolean) => void): Promi
   return listen<GitStaleEvent>("git:stale", (e) => cb(e.payload.root, e.payload.metadata === true));
 }
 
-export function onPtyOut(id: number, cb: (bytes: Uint8Array) => void): Promise<UnlistenFn> {
-  return listen<string>(`pty:out:${id}`, (e) => cb(b64decode(e.payload)));
-}
-
-export function onPtyExit(id: number, cb: (code: number | null) => void): Promise<UnlistenFn> {
-  return listen<{ id: number; code: number | null }>(`pty:exit:${id}`, (e) => cb(e.payload.code));
+/** Shared delivery transport; launchId selects the already-installed sink. */
+export function onPtyEvent(cb: (event: PtyEvent) => void): Promise<UnlistenFn> {
+  return listen<PtyEvent>("pty:launch", (e) => cb(e.payload));
 }
 
 export function onSearchChunk(cb: (chunk: SearchChunk) => void): Promise<UnlistenFn> {

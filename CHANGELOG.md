@@ -52,6 +52,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Terminal output and exit state now survive a fast process finishing before
+  its spawn acknowledgement. Launch sinks are ready before spawning, remain
+  isolated across projects/retries, and stop receiving events when closed.
 - Renaming a session in the Agents cockpit now also renames the terminal
   tab hosting that session's PTY — the tab previously kept the spawn-time
   label, so the cockpit card and tab disagreed and the exit notice logged

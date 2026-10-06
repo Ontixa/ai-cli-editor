@@ -16,7 +16,7 @@ No network, no plugins beyond `dialog`. The PTY is the integration layer.
 │                 types                                          │
 └───────────────▲──────────────────────────────┬────────────────┘
                 │ events: fs:batch,            │ invoke():
-                │ pty:out:N, pty:exit:N,       │ list_dir, read_file,
+                │ pty:launch,                         │ list_dir, read_file,
                 │ search:chunk/done, git:stale │ write_file, git_status,
                 │ session:update               │ pty_*, search_*,
                 │                              │ session_*, worktree_*,
@@ -53,15 +53,14 @@ No network, no plugins beyond `dialog`. The PTY is the integration layer.
 
 ## Event contracts
 
-| Event            | Payload                          | Purpose                    |
-| ---------------- | -------------------------------- | -------------------------- |
-| `fs:batch`       | `FsChange[]`                     | merged fs changes          |
-| `git:stale`      | `null`                           | hint to refetch git status |
-| `pty:out:N`      | `string` (base64 bytes)          | terminal output            |
-| `pty:exit:N`     | `{ id, code }`                   | process exit               |
-| `search:chunk`   | `{ id, matches: SearchMatch[] }` | streamed results           |
-| `search:done`    | `{ id, truncated }`              | search finished            |
-| `session:update` | `{ sessions, collisions }`       | session registry snapshot  |
+| Event            | Payload                                  | Purpose                    |
+| ---------------- | ---------------------------------------- | -------------------------- |
+| `fs:batch`       | `FsChange[]`                             | merged fs changes          |
+| `git:stale`      | `null`                                   | hint to refetch git status |
+| `pty:launch`     | `{ launchId, id, event, data? , code? }` | launch-scoped output/exit  |
+| `search:chunk`   | `{ id, matches: SearchMatch[] }`         | streamed results           |
+| `search:done`    | `{ id, truncated }`                      | search finished            |
+| `session:update` | `{ sessions, collisions }`               | session registry snapshot  |
 
 `FsChange = { kind: "created"|"modified"|"deleted"|"renamed", path,
 oldPath? }` — workspace-relative, `/`-separated, already deduplicated.
@@ -80,9 +79,26 @@ notify events → channel → debounce thread:
 
 ## PTY lifecycle
 
+The frontend installs an exact launch sink, awaits the shared `pty:launch`
+listener, then calls `pty_spawn` with a new UUID `launchId`. The backend echoes
+that identifier and the actual PTY `id` on each event: `event: "output"` carries
+base64 `data`, while `event: "exit"` carries nullable `code`. Reader/waiter events
+can arrive before the spawn acknowledgement; both already have a destination.
+Output stays as bytes for xterm, including split UTF-8 and trailing output after
+exit. The sink records exit only once and follows its project while detached.
+Closing or a failed spawn removes the sink; closing during spawn kills only the
+returned owned PTY. Retry creates a fresh launch identifier. No output is retained
+by the dispatcher, and unknown/retired launch identifiers are discarded.
+
+The single dispatcher stays registered for the webview lifetime. A failed
+listener registration is latched and reports that restarting the editor is required;
+retrying it per launch could retain inaccessible callbacks in Tauri's public
+`listen` API. Ordinary process-start failures remain retryable. No process is
+started if event setup fails or the tab is closed while setup is pending.
+
 `pty_spawn` → `openpty` → `spawn_command` → reader thread (8 KB chunks →
-base64 → `pty:out`) + waiter thread (`child.wait` → `pty:exit` → registry
-cleanup). `pty_kill` removes + kills. `open_workspace` kills all sessions.
+base64 output) + waiter thread (`try_wait` → exit → registry cleanup).
+`pty_kill` removes + kills. Workspace close kills that workspace's sessions.
 
 On Windows, `.cmd`/`.bat`/`.ps1` programs are wrapped in `cmd /c` /
 `powershell -File` so npm shims (codex, claude, …) launch correctly.
@@ -97,7 +113,7 @@ command runs, child processes, git summary.
 
 - **Lifecycle** — PTY output marks the session busy (5 s window or while
   child processes are observed); quiet live sessions are `idle`;
-  `pty:exit` freezes the session (`exited` + code). On startup, persisted
+  A PTY exit freezes the session (`exited` + code). On startup, persisted
   sessions are restored as `stale` history — never as live processes.
 - **Attribution** — the watcher merge hook records each fs change against
   live sessions. A session claims a path directly when its `relPrefix`

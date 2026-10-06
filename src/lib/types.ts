@@ -74,6 +74,11 @@ export interface PtyInfo {
   pid?: number | null;
 }
 
+/** Launch-correlated events; the sink is ready before pty_spawn starts. */
+export type PtyEvent =
+  | { event: "output"; launchId: string; id: number; data: string }
+  | { event: "exit"; launchId: string; id: number; code: number | null };
+
 // ---------- agent sessions (v0.2) ----------
 
 export type SessionState = "starting" | "busy" | "idle" | "exited" | "stale";

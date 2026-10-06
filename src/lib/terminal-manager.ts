@@ -12,8 +12,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
-import type { UnlistenFn } from "@tauri-apps/api/event";
-import { api, onPtyOut, onPtyExit } from "./ipc";
+import { api, b64decode, onPtyEvent } from "./ipc";
+import type { PtyEvent } from "./types";
 import { extractLinkRefs } from "./term-links";
 import { pushNotice, type ActivityItem } from "./activity";
 import { openFile, refreshAgents } from "../state/actions";
@@ -74,13 +74,30 @@ interface TermRec {
   ptyId: number | null;
   /** PTY spawn in flight / completed — guards double-spawn on remount. */
   spawning: boolean;
-  unlisteners: UnlistenFn[];
+  stopEvents: (() => void) | null;
   pendingInput: string[];
   disposers: (() => void)[];
 }
 
 const terms = new Map<number, TermRec>();
 let themeWired = false;
+const launchSinks = new Map<string, (event: PtyEvent) => void>();
+let eventsReady: Promise<void> | undefined;
+
+function readyPtyEvents(): Promise<void> {
+  // One dispatcher for the webview lifetime; retain only live sinks, never output.
+  // Keep a rejected registration latched too: Tauri exposes no public cleanup
+  // for a callback whose listen() invocation itself failed. Retrying per launch
+  // would accumulate callbacks. Restarting the editor resets this transport failure.
+  eventsReady ??= onPtyEvent((event) => launchSinks.get(event.launchId)?.(event))
+    .then(() => {})
+    .catch((error: unknown) => {
+      throw new Error(
+        `terminal event setup failed; restart the editor before trying again: ${String(error)}`,
+      );
+    });
+  return eventsReady;
+}
 
 function wireTheme() {
   if (themeWired) return;
@@ -95,10 +112,11 @@ function wireTheme() {
   });
 }
 
-/** Store the freshly-arrived PTY id on whichever project owns `seq`. */
-function markSpawned(seq: number, ptyId: number) {
+/** Update launch state on whichever project owns `seq`. */
+function patchLaunch(seq: number, fields: Partial<Pick<TerminalSession, "ptyId" | "exited">>) {
   const s = store.get();
-  const patch = (list: TerminalSession[]) => list.map((t) => (t.seq === seq ? { ...t, ptyId } : t));
+  const patch = (list: TerminalSession[]) =>
+    list.map((t) => (t.seq === seq ? { ...t, ...fields } : t));
   if (s.terminals.some((t) => t.seq === seq)) {
     store.set({ terminals: patch(s.terminals) });
     return;
@@ -167,7 +185,7 @@ function ensureRec(session: TerminalSession): TermRec {
     fit,
     ptyId: null,
     spawning: false,
-    unlisteners: [],
+    stopEvents: null,
     pendingInput: [],
     disposers: [],
   };
@@ -235,40 +253,80 @@ async function spawnPty(session: TerminalSession, rec: TermRec) {
   }
   const dims = rec.fit.proposeDimensions();
   let info;
+  let eventPtyId: number | null = null;
+  let exited = false;
+  let active = true;
+  const launchId = globalThis.crypto.randomUUID();
+  const stopEvents = () => {
+    active = false;
+    launchSinks.delete(launchId);
+  };
+  rec.stopEvents = stopEvents;
   try {
-    info = await api.ptySpawn({
-      kind: session.program ? "command" : "shell",
-      program: session.program,
-      args: session.args,
-      label: session.label,
-      cwd: session.cwd,
-      workspace: session.wsRoot,
-      initCmd: session.initCmd,
-      cols: dims?.cols ?? 80,
-      rows: dims?.rows ?? 24,
+    // Install this exact launch sink before waiting for the shared listener.
+    // Nothing can spawn until the backend acknowledges listener registration.
+    launchSinks.set(launchId, (event) => {
+      if (!active || terms.get(session.seq) !== rec) return;
+      if (eventPtyId === null) {
+        eventPtyId = event.id;
+        patchLaunch(session.seq, { ptyId: event.id });
+      }
+      if (!active || terms.get(session.seq) !== rec) return;
+      if (event.id !== eventPtyId) return;
+      if (event.event === "output") {
+        rec.term.write(b64decode(event.data));
+      } else if (!exited) {
+        exited = true;
+        rec.term.write(
+          `\r\n\x1b[90m[process exited${event.code !== null ? ` ${event.code}` : ""}]\x1b[0m\r\n`,
+        );
+        markExited(event.id, event.code);
+      }
     });
+    await readyPtyEvents();
+    if (!active || terms.get(session.seq) !== rec) {
+      stopEvents();
+      return;
+    }
+    info = await api.ptySpawn(
+      {
+        kind: session.program ? "command" : "shell",
+        program: session.program,
+        args: session.args,
+        label: session.label,
+        cwd: session.cwd,
+        workspace: session.wsRoot,
+        initCmd: session.initCmd,
+        cols: dims?.cols ?? 80,
+        rows: dims?.rows ?? 24,
+      },
+      launchId,
+    );
   } catch (e) {
+    stopEvents();
+    // A bridge rejection can occur after correlated output proved this child
+    // exists. Retire only that launch-owned PTY, even if its tab already closed.
+    if (eventPtyId !== null) void api.ptyKill(eventPtyId).catch(() => {});
+    if (terms.get(session.seq) !== rec) return;
+    rec.stopEvents = null;
+    rec.pendingInput = [];
+    patchLaunch(session.seq, { ptyId: undefined, exited: false });
+    if (terms.get(session.seq) !== rec) return;
     rec.term.writeln(`\x1b[31mfailed to start terminal: ${String(e)}\x1b[0m`);
     rec.spawning = false;
     return;
   }
-  if (!terms.has(session.seq)) {
+  if (terms.get(session.seq) !== rec) {
     // Session was closed while the spawn was in flight.
     void api.ptyKill(info.id).catch(() => {});
     return;
   }
   rec.ptyId = info.id;
-  markSpawned(session.seq, info.id);
-
-  rec.unlisteners.push(
-    await onPtyOut(info.id, (bytes) => rec.term.write(bytes)),
-    await onPtyExit(info.id, (code) => {
-      rec.term.write(`\r\n\x1b[90m[process exited${code !== null ? ` ${code}` : ""}]\x1b[0m\r\n`);
-      markExited(info.id, code);
-    }),
-  );
-
-  for (const d of rec.pendingInput) void api.ptyWrite(info.id, d);
+  eventPtyId = info.id;
+  patchLaunch(session.seq, { ptyId: info.id });
+  if (terms.get(session.seq) === rec && !exited) {
+    for (const d of rec.pendingInput) void api.ptyWrite(info.id, d).catch(() => {});
+  }
   rec.pendingInput = [];
 }
 
@@ -309,7 +367,8 @@ export function disposeTerm(seq: number) {
   const rec = terms.get(seq);
   if (!rec) return;
   terms.delete(seq);
-  for (const u of rec.unlisteners) u();
+  rec.stopEvents?.();
+  rec.stopEvents = null;
   for (const d of rec.disposers) {
     try {
       d();

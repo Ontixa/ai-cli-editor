@@ -28,6 +28,22 @@ pub const MAX_PROGRAM_LEN: usize = 512;
 /// Session labels get the same bound as `session_rename` (chars).
 pub const MAX_LABEL_LEN: usize = 80;
 
+/// A frontend-generated UUID identifies one launch attempt, including retries.
+pub fn validate_launch_id(id: &str) -> AppResult<()> {
+    if id.len() != 36
+        || !id.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err(AppError::InvalidInput("invalid terminal launch id".into()));
+    }
+    Ok(())
+}
+
 fn validate_command_spec(program: &str, args: &[String]) -> AppResult<()> {
     if program.trim().is_empty() {
         return Err(AppError::InvalidInput("empty program".into()));
@@ -61,6 +77,26 @@ fn bounded_label(label: &str) -> String {
 
 /// Event forwarder: `(session_id, kind, payload)` where kind is "out"|"exit".
 pub type PtyEmit = Arc<dyn Fn(u64, &str, serde_json::Value) + Send + Sync>;
+
+/// Correlates events with the frontend sink installed before this launch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "event",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PtyEvent {
+    Output {
+        launch_id: String,
+        id: u64,
+        data: String,
+    },
+    Exit {
+        launch_id: String,
+        id: u64,
+        code: Option<i64>,
+    },
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -317,6 +353,47 @@ impl SpawnSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_ids_are_bounded_and_events_match_the_frontend_contract() {
+        let launch_id = "550e8400-e29b-41d4-a716-446655440000";
+        assert!(validate_launch_id(launch_id).is_ok());
+        for invalid in [
+            "",
+            "../event",
+            &"a".repeat(37),
+            "550e8400/e29b-41d4-a716-446655440000",
+        ] {
+            assert!(validate_launch_id(invalid).is_err());
+        }
+        assert_eq!(
+            serde_json::to_value(PtyEvent::Output {
+                launch_id: launch_id.into(),
+                id: 71,
+                data: "4oI=".into()
+            })
+            .unwrap(),
+            serde_json::json!({"event":"output", "launchId":launch_id, "id":71, "data":"4oI="})
+        );
+        assert_eq!(
+            serde_json::to_value(PtyEvent::Exit {
+                launch_id: launch_id.into(),
+                id: 71,
+                code: Some(7)
+            })
+            .unwrap(),
+            serde_json::json!({"event":"exit", "launchId":launch_id, "id":71, "code":7})
+        );
+        assert_eq!(
+            serde_json::to_value(PtyEvent::Exit {
+                launch_id: launch_id.into(),
+                id: 71,
+                code: None
+            })
+            .unwrap()["code"],
+            serde_json::Value::Null
+        );
+    }
 
     #[test]
     fn command_spec_accepts_typical_argv() {
