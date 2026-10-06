@@ -652,7 +652,9 @@ fn pty_spawn(
     app: AppHandle,
     state: State<AppState>,
     args: PtySpawnArgs,
+    launch_id: String,
 ) -> AppResult<pty::PtyInfo> {
+    pty::validate_launch_id(&launch_id)?;
     let root = match args.workspace.as_deref() {
         Some(p) => workspace_key(&state, p)
             .ok_or_else(|| AppError::NotFound(format!("workspace not open: {p}")))?,
@@ -713,6 +715,16 @@ fn pty_spawn(
     let emit: pty::PtyEmit = Arc::new(move |id, kind, payload| {
         match kind {
             "out" => {
+                if let Some(data) = payload.as_str() {
+                    let _ = emit_app.emit(
+                        "pty:launch",
+                        pty::PtyEvent::Output {
+                            launch_id: launch_id.clone(),
+                            id,
+                            data: data.into(),
+                        },
+                    );
+                }
                 // Decode the base64 chunk so the session meter can scan
                 // the text for token/cost lines the CLI printed.
                 let bytes = payload
@@ -724,13 +736,20 @@ fn pty_spawn(
             }
             "exit" => {
                 let code = payload.get("code").and_then(|c| c.as_i64());
+                let _ = emit_app.emit(
+                    "pty:launch",
+                    pty::PtyEvent::Exit {
+                        launch_id: launch_id.clone(),
+                        id,
+                        code,
+                    },
+                );
                 sessions.note_exit(id, code);
                 emit_sessions(&emit_app, &emit_root, true);
                 persist_sessions(&emit_app, true);
             }
             _ => {}
         }
-        let _ = emit_app.emit(&format!("pty:{kind}:{id}"), payload);
     });
     let info = state.ptys.spawn(spec, emit)?;
 
