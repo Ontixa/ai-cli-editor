@@ -147,7 +147,7 @@ function DocBanners({ path }: { path: string }) {
     <>
       {doc.conflict && (
         <div className="banner warn">
-          <span>Changed on disk while you have unsaved edits.</span>
+          <span>Changed on disk. Your open buffer was kept.</span>
           <button className="btn small" onClick={() => void reloadFile(path)}>
             Discard mine &amp; reload
           </button>

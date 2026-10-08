@@ -74,7 +74,9 @@ All fs commands canonicalize and enforce workspace-root containment.
   dist, build, .next, .turbo, .cache, out, coverage); configurable later.
 - Debounce: 120 ms quiet / 400 ms max batch; merge per path; rename pairing.
 - Large files: >4 MB or >100k lines open read-only with notice.
-- Dirty files never auto-reload; external change sets a conflict banner.
+- Dirty files never auto-reload. Delivered changes read complete disk text
+  under workspace ownership: unchanged acknowledged content preserves state;
+  differing or unavailable content keeps the buffer and shows a conflict banner.
 - PTY output base64 over events → `term.write(Uint8Array)`.
 - Editor defaults to read-only; Ctrl+E toggles edit mode per tab.
 - Follow Agent: 900 ms quiet debounce, >4 files/s -> burst indicator,

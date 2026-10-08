@@ -52,6 +52,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- File changes arriving just after successful or failed Save are now reconciled
+  against complete acknowledged disk text, without a two-second suppression
+  window. Unchanged content preserves editor state and history; differing or
+  unreadable content keeps dirty buffers with a warning. Explicit Reload works
+  immediately, and newer edits, queued events, and reopened documents retain
+  their ownership protections. Save's direct overwrite behavior is unchanged.
 - Command Palette now shows registered commands on its first open and refreshes
   availability as workspace state changes. Selection survives changing rows,
   reopening starts clean, and IME keys cannot accidentally invoke commands.

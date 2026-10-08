@@ -114,7 +114,13 @@ tree, a real diff — and stays fast and stable through long agent sessions.
 - **Dark + light themes** — command-palette toggle, persisted across
   sessions, applied to the editor and the terminal too.
 - **CodeMirror 6 editor** — view-first by design; `Ctrl+E` toggles edit mode
-  for the small fixes humans still make. `Ctrl+S` saves.
+  for the small fixes humans still make. `Ctrl+S` saves. Delivered file changes
+  are checked after pending saves: unchanged complete text keeps editor history,
+  while different text reloads a clean buffer or warns if you have unsaved edits.
+  Incomplete or unreadable disk content also keeps your open buffer with a warning.
+  Use **Discard mine & reload** to accept readable disk content; edits made after
+  you request it stay protected. Save directly overwrites with your buffer and
+  does not provide an atomic conflict check against other processes.
 - **Quick Open (`Ctrl+P`)** — fuzzy filename search over a lazy,
   watcher-maintained index. No content indexing.
 - **Workspace search (`Ctrl+Shift+F`)** — streams results through ripgrep
