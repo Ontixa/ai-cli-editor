@@ -1,44 +1,55 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { store } from "../../state/app";
-import { useStore } from "../../lib/store";
+import { shallow, useStore } from "../../lib/store";
 import { setPaletteOpen, markUserAction } from "../../state/actions";
 import { commands, normalizeShortcut } from "../../lib/commands";
 import { fuzzyScore } from "../../lib/fuzzy";
 
 export function CommandPalette() {
   const open = useStore(store, (s) => s.paletteOpen);
-  const [query, setQuery] = useState("");
-  const [cursor, setCursor] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [, force] = useState(0);
+  return open ? <OpenCommandPalette /> : null;
+}
 
-  // Palette list refreshes on open (command `when` predicates re-evaluate).
+function OpenCommandPalette() {
+  // Read after registration on every open, then track state-backed `when`
+  // predicates while visible without rerendering for unrelated store updates.
+  const available = useStore(store, () => commands.list(), shallow);
+  const [query, setQuery] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const composing = useRef(false);
+
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setCursor(0);
-      force((n) => n + 1);
-      requestAnimationFrame(() => inputRef.current?.focus());
-    }
-  }, [open]);
+    const frame = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, []);
 
   const results = useMemo(() => {
-    const all = commands.list();
-    if (!query.trim()) return all;
-    return all
+    if (!query.trim()) return available;
+    return available
       .map((c) => ({ c, s: fuzzyScore(query, c.title) }))
-      .filter((x): x is { c: (typeof all)[number]; s: number } => x.s !== null)
+      .filter((x): x is { c: (typeof available)[number]; s: number } => x.s !== null)
       .sort((a, b) => b.s - a.s)
       .map((x) => x.c);
-  }, [query]);
+  }, [query, available]);
+  // Availability can insert/remove rows. Keep a command selected by identity,
+  // and fall back to the first result if it disappears (including empty lists).
+  const selected = Math.max(
+    0,
+    results.findIndex((c) => c.id === selectedId),
+  );
+  const highlightedId = results[selected]?.id ?? null;
 
-  useEffect(() => setCursor(0), [query]);
-
-  if (!open) return null;
+  // Default and fallback highlights also own their identity before the next
+  // availability change; otherwise a newly inserted row could steal Enter.
+  useEffect(() => {
+    if (selectedId !== highlightedId) setSelectedId(highlightedId);
+  }, [highlightedId, selectedId]);
 
   const run = (i: number) => {
     const c = results[i];
-    if (!c) return;
+    // Closing updates the store synchronously, before React removes the input.
+    if (!c || !store.get().paletteOpen) return;
     setPaletteOpen(false);
     markUserAction();
     void commands.run(c.id);
@@ -52,18 +63,30 @@ export function CommandPalette() {
           className="picker-input"
           placeholder="Type a command…"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setSelectedId(null);
+          }}
+          onCompositionStart={() => {
+            composing.current = true;
+          }}
+          onCompositionEnd={() => {
+            composing.current = false;
+          }}
           onKeyDown={(e) => {
-            if (e.key === "Escape") setPaletteOpen(false);
-            else if (e.key === "ArrowDown") {
+            if (composing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
+            if (e.key === "Escape") {
               e.preventDefault();
-              setCursor((c) => Math.min(c + 1, results.length - 1));
+              setPaletteOpen(false);
+            } else if (e.key === "ArrowDown") {
+              e.preventDefault();
+              setSelectedId(results[Math.min(selected + 1, results.length - 1)]?.id ?? null);
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
-              setCursor((c) => Math.max(c - 1, 0));
+              setSelectedId(results[Math.max(selected - 1, 0)]?.id ?? null);
             } else if (e.key === "Enter") {
               e.preventDefault();
-              run(cursor);
+              run(selected);
             }
           }}
           spellCheck={false}
@@ -72,9 +95,9 @@ export function CommandPalette() {
           {results.map((c, i) => (
             <button
               key={c.id}
-              className={`picker-row ${i === cursor ? "selected" : ""}`}
+              className={`picker-row ${i === selected ? "selected" : ""}`}
               onClick={() => run(i)}
-              onMouseEnter={() => setCursor(i)}
+              onMouseEnter={() => setSelectedId(c.id)}
             >
               <span className="picker-cmd">
                 {c.category && <span className="dim">{c.category}: </span>}
