@@ -891,8 +891,10 @@ export function markDocDirty(path: string, dirty: boolean, root = wsRoot()) {
 export function saveFile(path?: string): Promise<boolean> {
   const root = wsRoot();
   const p = path ?? activeFilePath();
+  const identity = p ? editorManager.documentIdentity(root, p) : undefined;
   return withWorkspaceOwner(async () => {
-    if (!root || !p || wsRoot() !== root) return false;
+    if (!root || !p || wsRoot() !== root || !editorManager.isCurrentDocument(root, p, identity))
+      return false;
     return saveFileNow(root, p);
   });
 }
@@ -905,30 +907,39 @@ async function saveFileNow(root: string, p: string): Promise<boolean> {
   const doc = s.docs[p];
   if (doc && !doc.editable && !doc.dirty) return true;
   invalidateHumanReviews(root, [p]);
-  editorManager.markSelfWrite(root, p);
+  const attempt = editorManager.beginWrite(root, p, text);
+  if (!attempt) return false;
   try {
     const res = await api.writeFile(p, text);
     // A project switch or a newer edit must not let Save & Close discard
     // a buffer that this write did not save.
-    if (wsRoot() !== root) return false;
+    if (wsRoot() !== root || !attempt.complete(true)) return false;
     const d = store.get().docs[p];
     const dirty = editorManager.getText(root, p) !== text;
     if (d) {
       store.set({
         docs: {
           ...store.get().docs,
-          [p]: { ...d, dirty, conflict: false, mtimeMs: res.mtimeMs },
+          [p]: {
+            ...d,
+            dirty,
+            conflict: attempt.hasDiskChanges() ? d.conflict : false,
+            mtimeMs: res.mtimeMs,
+          },
         },
       });
     }
     return !!d && !dirty;
   } catch (e) {
+    if (wsRoot() !== root || !attempt.isCurrent()) return false;
     askConfirm({
       title: `Could not save ${p}`,
       message: `Your changes are still open. ${String(e)}`,
       buttons: [{ label: "OK", kind: "primary" }],
     });
     return false;
+  } finally {
+    attempt.complete(false);
   }
 }
 
@@ -949,19 +960,23 @@ export function reloadFile(path?: string): Promise<void> {
   const root = wsRoot();
   // Explicit Reload / Discard mine approves only the buffer visible now.
   const discardedText = p && root ? editorManager.getText(root, p) : null;
+  const identity = p ? editorManager.documentIdentity(root, p) : undefined;
   return withWorkspaceOwner(async () => {
     if (!p || !root || wsRoot() !== root) return;
-    await reloadFileNow(root, p, { discardedText });
+    await reloadFileNow(root, p, { discardedText, identity });
   });
 }
 
 async function reloadFileNow(
   root: string,
   p: string,
-  options: { discardedText?: string | null; externalChange?: boolean } = {},
+  options: { discardedText?: string | null; externalChange?: boolean; identity?: object } = {},
 ) {
   const s = store.get();
   const { discardedText, externalChange } = options;
+  const identity =
+    "identity" in options ? options.identity : editorManager.documentIdentity(root, p);
+  if (!editorManager.isCurrentDocument(root, p, identity)) return;
   if (wsRoot() !== root) {
     // A switch can overtake an fs-triggered reload. Preserve its warning on
     // the dirty owner without reading through another project's backend root.
@@ -982,29 +997,53 @@ async function reloadFileNow(
   }
   const doc = s.docs[p];
   if (!doc) return;
-  if (discardedText === undefined ? doc.dirty : editorManager.getText(root, p) !== discardedText) {
+  if (
+    discardedText === undefined
+      ? doc.dirty && !externalChange
+      : editorManager.getText(root, p) !== discardedText
+  ) {
     if (externalChange) {
       store.set({ docs: { ...store.get().docs, [p]: { ...doc, conflict: true } } });
     }
     return;
   }
-  const res = await editorManager.reloadFromDisk(root, p, false);
+  const diskVersion = editorManager.diskChangeVersion(root, p);
+  const res = await editorManager.reloadFromDisk(
+    root,
+    p,
+    !!externalChange && doc.dirty,
+    !!externalChange,
+  );
+  if (
+    wsRoot() !== root ||
+    !editorManager.isCurrentDocument(root, p, identity) ||
+    editorManager.diskChangeVersion(root, p) !== diskVersion
+  )
+    return;
   const d = store.get().docs[p];
-  if (res.status === "reloaded" && d) {
+  if (res.status === "unchanged" && d) {
+    store.set({
+      docs: {
+        ...store.get().docs,
+        [p]: { ...d, deletedOnDisk: false, missing: false, mtimeMs: res.mtimeMs ?? d.mtimeMs },
+      },
+    });
+  } else if (res.status === "reloaded" && d) {
+    const dirty = editorManager.getText(root, p) !== res.text;
     store.set({
       docs: {
         ...store.get().docs,
         [p]: {
           ...d,
-          dirty: false,
-          conflict: false,
+          dirty,
+          conflict: dirty,
           deletedOnDisk: false,
           missing: false,
           mtimeMs: res.mtimeMs ?? d.mtimeMs,
         },
       },
     });
-  } else if (res.status === "conflict" && d) {
+  } else if ((res.status === "conflict" || res.status === "unavailable") && d) {
     store.set({ docs: { ...store.get().docs, [p]: { ...d, conflict: true } } });
   } else if (res.status === "gone" && d) {
     store.set({
@@ -1026,6 +1065,10 @@ const recentExternal = new Map<string, number>();
 let gitRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function applyFsBatch(batch: FsBatch) {
+  for (const change of batch.changes) {
+    editorManager.noteDiskChange(batch.root, change.path);
+    if (change.oldPath) editorManager.noteDiskChange(batch.root, change.oldPath);
+  }
   invalidateHumanReviews(
     batch.root,
     batch.changes.flatMap((c) => (c.oldPath ? [c.path, c.oldPath] : [c.path])),
@@ -1127,14 +1170,12 @@ function applyFsBatchActive(changes: FsChange[]) {
     if (c.kind === "modified" || c.kind === "created") {
       const d = docs[c.path];
       if (d && !d.missing) {
-        if (editorManager.isSelfWrite(root, c.path)) {
-          docs[c.path] = { ...d, deletedOnDisk: false };
-        } else if (d.dirty) {
-          docs[c.path] = { ...d, conflict: true };
-        } else {
-          // The document's project may switch before the queued read starts.
-          void withWorkspaceOwner(() => reloadFileNow(root, c.path, { externalChange: true }));
-        }
+        // Observe after pending saves settle, including failures. Capture the
+        // document now so a queued event cannot apply to a reopened namesake.
+        const identity = editorManager.documentIdentity(root, c.path);
+        void withWorkspaceOwner(() =>
+          reloadFileNow(root, c.path, { externalChange: true, identity }),
+        );
       }
     } else if (c.kind === "deleted") {
       const d = docs[c.path];

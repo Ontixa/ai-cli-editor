@@ -53,9 +53,13 @@
 
 - **Open folder** → `open_workspace` sets canonical root, restarts watcher,
   resets index, kills PTYs → `fs:batch` streams changes.
-- **Save** → `write_file` → watcher event suppressed via self-write marker.
-- **External modify** → `fs:batch` → doc reload (clean) or `conflict` banner
-  (dirty).
+- **Save** → `write_file` → successful text acknowledged for that document;
+  queued watcher observations run after the attempt settles, including failure.
+- **External modify** → `fs:batch` → complete text compared with acknowledged
+  content. Equal text preserves exact editor state; different text reloads a
+  clean buffer or raises `conflict` for dirty content. Incomplete/failed reads
+  retain the open buffer with a warning. Explicit Reload preserves newer edits.
+  Save remains a direct overwrite, without cross-process compare-and-write.
 - **Terminal link** → `extractLinkRefs` → `resolve_link_target`
   (containment-checked) → `openFile(path, {line, col})`.
 - **Terminal spawn** → `pty_spawn` → PTY + `AgentSession` (rooted at `cwd`

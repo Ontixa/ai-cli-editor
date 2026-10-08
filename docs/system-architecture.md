@@ -221,10 +221,23 @@ are attached/detached per visible tab.
 
 ## Reliability rules
 
-- Unsaved edits are never overwritten: external modify on a dirty doc sets
-  `conflict` (banner) instead of reloading.
-- Self-writes are suppressed via a 2 s marker so our own save doesn't
-  trigger a reload loop.
+- Active-document modifications are reconciled under the workspace-owner
+  queue, after pending saves settle. A complete text snapshot equal to the last
+  loaded or successfully saved content leaves the exact editor state intact;
+  equality says nothing about which process wrote the file.
+- Different disk text reloads clean buffers. Dirty buffers and incomplete,
+  binary, or failed reads keep their open content/history and show a conflict
+  banner. Explicit Reload can discard the approved buffer, but never newer
+  edits made while it waits. Unchanged observations preserve existing warnings.
+- Background-project events keep conflict/deletion bookkeeping without reading
+  through another workspace. On activation, clean buffers reconcile with disk;
+  dirty buffers retain their existing warnings and only re-check existence.
+- Write attempts and queued observations belong to a document identity and
+  workspace. Failed writes acknowledge no text; retired documents and older
+  observations cannot commit over newer state. Mounted and detached reloads
+  retain undo history, and unchanged observations preserve cursor/scroll.
+- Save still directly writes the captured buffer. This notification handling
+  does not provide cross-process compare-and-write or atomic conflict rejection.
 - Files deleted on disk keep their content + a "deleted" banner.
 - `load_state` validates `version` and falls back to defaults on corrupt
   JSON; saves are tmp+rename.
