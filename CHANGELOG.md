@@ -52,6 +52,9 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Command Palette now shows registered commands on its first open and refreshes
+  availability as workspace state changes. Selection survives changing rows,
+  reopening starts clean, and IME keys cannot accidentally invoke commands.
 - Terminal output and exit state now survive a fast process finishing before
   its spawn acknowledgement. Launch sinks are ready before spawning, remain
   isolated across projects/retries, and stop receiving events when closed.
