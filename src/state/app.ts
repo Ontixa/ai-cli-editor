@@ -2,6 +2,7 @@ import type { HumanReview } from "../lib/review-progress";
 import { Store } from "../lib/store";
 import type { ActivityItem } from "../lib/activity";
 import type { SessionPreset } from "../lib/presets";
+import type { TerminalFindState } from "../lib/terminal-find";
 import type {
   AgentInfo,
   AgentSession,
@@ -183,6 +184,9 @@ export interface AppState {
   terminals: TerminalSession[];
   activeTerminal: number | null;
   terminalSeq: number;
+  /** Transient mounted-buffer availability and find UI; never persisted. */
+  terminalFindTarget: number | null;
+  terminalFind: TerminalFindState | null;
 
   agents: AgentInfo[];
   shellLabel: string;
@@ -292,6 +296,8 @@ export const initialState: AppState = {
   terminals: [],
   activeTerminal: null,
   terminalSeq: 0,
+  terminalFindTarget: null,
+  terminalFind: null,
   agents: [],
   shellLabel: "terminal",
   sessions: [],

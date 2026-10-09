@@ -1,0 +1,22 @@
+.browser-fixture {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.browser-fixture h1 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.browser-fixture p {
+  color: var(--fg-dim);
+}
+
+.browser-fixture nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0;
+}

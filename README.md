@@ -125,6 +125,13 @@ tree, a real diff — and stays fast and stable through long agent sessions.
   watcher-maintained index. No content indexing.
 - **Workspace search (`Ctrl+Shift+F`)** — streams results through ripgrep
   when installed, with a built-in fallback when it isn't.
+- **Find in Terminal** — use **Find** in the terminal header or the command
+  palette to search the selected terminal's retained output, including exited
+  tabs. Type literal text, then `Enter` / `Shift+Enter` for next / previous
+  matches; navigation wraps. `Escape` closes Find and returns to that terminal.
+  New output marks results stale until you search again. Full-screen terminal
+  programs expose their current alternate screen, not hidden scrollback.
+  See [terminal search scope and controls](docs/terminal-find.md).
 - **Clickable terminal paths** — `src/foo.ts:123:20` Ctrl+click opens the
   file at that line (Windows paths included).
 - **Local persistence** — reopens your last workspace, tabs, layout, and
@@ -190,6 +197,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 Shortcuts pass through to the shell while the terminal has focus (so
 `Ctrl+P`/`Ctrl+S`/`Ctrl+W` keep their readline meanings inside agents).
+Terminal Find has a palette entry and header button; `Ctrl+F` keeps its shell
+meaning, and `Ctrl+Shift+F` still searches workspace files.
 
 ## Supported coding CLIs
 

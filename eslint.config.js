@@ -5,10 +5,18 @@ import reactHooks from "eslint-plugin-react-hooks";
 
 /** @type {import("eslint").Linter.FlatConfig[]} */
 export default [
-  { ignores: ["dist/**", "src-tauri/**", "node_modules/**", "coverage/**"] },
+  {
+    ignores: [
+      "dist/**",
+      "src-tauri/**",
+      "node_modules/**",
+      "coverage/**",
+      "tests/browser/.artifacts/**",
+    ],
+  },
   js.configs.recommended,
   {
-    files: ["src/**/*.{ts,tsx}", "vite.config.ts"],
+    files: ["src/**/*.{ts,tsx}", "tests/browser/**/*.{ts,tsx}", "vite.config.ts"],
     languageOptions: {
       parser: tsParser,
       parserOptions: { ecmaVersion: 2022, sourceType: "module", ecmaFeatures: { jsx: true } },
@@ -52,6 +60,18 @@ export default [
       "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
       "@typescript-eslint/no-explicit-any": "warn",
       "no-console": ["warn", { allow: ["warn", "error"] }],
+    },
+  },
+  {
+    files: ["tests/browser/**/*.{ts,tsx}"],
+    languageOptions: {
+      globals: {
+        URLSearchParams: "readonly",
+        location: "readonly",
+        DataTransfer: "readonly",
+        ClipboardEvent: "readonly",
+        TextEncoder: "readonly",
+      },
     },
   },
   {

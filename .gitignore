@@ -14,6 +14,7 @@ Thumbs.db
 
 # Test coverage
 coverage/
+tests/browser/.artifacts/
 
 # AI assistant artifacts
 .devin/
