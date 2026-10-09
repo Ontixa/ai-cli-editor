@@ -226,7 +226,7 @@ test("closes an active query on terminal switch and deletion without leaking it"
   await page
     .locator(".terminal-tab")
     .filter({ hasText: "Beta shell" })
-    .getByRole("button", { name: "Kill terminal" })
+    .getByTitle("Kill terminal", { exact: true })
     .click();
   await expect(input(page)).toHaveCount(0);
   expect((await state(page)).activeTerminal).toBe(1);
@@ -260,7 +260,7 @@ test("closes active queries on project switch, project deletion, and panel hidin
   await openFind(page);
   await search(page, "project-alpha");
   await expect.poll(() => selected(page)).toBe("project-alpha");
-  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  await page.getByTitle("Hide terminal", { exact: true }).click();
   await expect(input(page)).toHaveCount(0);
   expect((await state(page)).find).toBeNull();
   expect((await state(page)).canFind).toBe(false);
