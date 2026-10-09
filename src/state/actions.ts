@@ -1120,6 +1120,7 @@ function applyFsToSnapshot(snap: ProjectSnapshot, changes: FsChange[]): ProjectS
     } else if (c.kind === "renamed" && c.oldPath) {
       const d = docs[c.oldPath];
       if (d) {
+        editorManager.renameDoc(snap.workspace.root, c.oldPath, c.path);
         docs[c.path] = { ...d, deletedOnDisk: false };
         delete docs[c.oldPath];
         tabs = tabs.map((t) =>

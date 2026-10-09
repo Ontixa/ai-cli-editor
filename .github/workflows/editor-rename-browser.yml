@@ -1,0 +1,47 @@
+name: Editor rename browser acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  editor-rename-browser:
+    name: Editor rename (real Chromium, synthetic files)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck browser fixture
+        run: npx tsc --noEmit --project tests/browser/editor-rename/tsconfig.json
+      - name: Build browser fixture
+        run: npx vite build --config tests/browser/editor-rename/vite.config.ts
+      - name: Install official Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run synthetic browser acceptance
+        run: npm run test:browser:editor-rename
+      - name: Upload scoped report, screenshots, and failure traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-rename-browser-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            tests/browser/.artifacts/editor-rename/report/
+            tests/browser/.artifacts/editor-rename/results/
+          if-no-files-found: ignore
+          retention-days: 7
