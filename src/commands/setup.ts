@@ -1,6 +1,7 @@
 import { commands } from "../lib/commands";
 import { store } from "../state/app";
 import * as A from "../state/actions";
+import { canFindInTerminal, openTerminalFind } from "../lib/terminal-manager";
 
 let done = false;
 
@@ -65,6 +66,13 @@ export function registerCommands() {
       when: hasWorkspace,
       run: () => A.newTerminal(),
       terminalSafe: true,
+    },
+    {
+      id: "terminal.find",
+      title: "Find in Terminal",
+      category: "Terminal",
+      when: () => store.get().terminalFindTarget !== null && canFindInTerminal(),
+      run: () => openTerminalFind(),
     },
     {
       id: "workbench.followAgent",

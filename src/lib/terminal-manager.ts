@@ -19,6 +19,7 @@ import { pushNotice, type ActivityItem } from "./activity";
 import { openFile, refreshAgents } from "../state/actions";
 import { store } from "../state/app";
 import type { TerminalSession } from "../state/app";
+import { TerminalBufferSearch } from "./terminal-find";
 
 const TERM_THEME = {
   background: "#0d1117",
@@ -80,6 +81,137 @@ interface TermRec {
 }
 
 const terms = new Map<number, TermRec>();
+interface FindOwner {
+  seq: number;
+  root: string;
+  rec: TermRec;
+  token: number;
+  search: TerminalBufferSearch;
+}
+let findOwner: FindOwner | undefined;
+let nextFindToken = 0;
+let findWired = false;
+
+/** Look up only an already-attached buffer. Find must never create a terminal. */
+function findTarget() {
+  const state = store.get();
+  if (!state.terminalVisible || !state.workspace || state.activeTerminal === null) return;
+  const session = state.terminals.find(
+    (terminal) =>
+      terminal.seq === state.activeTerminal && terminal.wsRoot === state.workspace!.root,
+  );
+  if (!session) return;
+  const rec = terms.get(session.seq);
+  if (!rec?.term.element?.isConnected) return;
+  return { seq: session.seq, root: session.wsRoot, rec };
+}
+
+function ownsFind(owner: FindOwner) {
+  const target = findTarget();
+  return (
+    findOwner === owner &&
+    target?.seq === owner.seq &&
+    target.root === owner.root &&
+    target.rec === owner.rec
+  );
+}
+
+function syncFindTarget() {
+  if (findOwner && !ownsFind(findOwner)) closeTerminalFind(false);
+  const seq = findTarget()?.seq ?? null;
+  if (store.get().terminalFindTarget !== seq) store.set({ terminalFindTarget: seq });
+}
+
+function wireFind() {
+  if (findWired) return;
+  findWired = true;
+  store.subscribe(syncFindTarget);
+}
+
+export function canFindInTerminal(): boolean {
+  return !!findTarget();
+}
+
+export function openTerminalFind() {
+  closeTerminalFind(false);
+  // Closing publishes synchronously. Keep a newer Find opened by an observer.
+  if (findOwner) return;
+  const target = findTarget();
+  if (!target) return;
+  const token = ++nextFindToken;
+  const owner: FindOwner = {
+    ...target,
+    token,
+    search: new TerminalBufferSearch(target.rec.term, () => {
+      if (!ownsFind(owner)) return;
+      const current = store.get().terminalFind;
+      if (current?.token !== token) return;
+      const status = current.query.length ? "stale" : "idle";
+      const bufferType = target.rec.term.buffer.active.type;
+      if (current.status === status && current.bufferType === bufferType) return;
+      store.set({
+        terminalFind: {
+          ...current,
+          status,
+          bufferType,
+        },
+      });
+    }),
+  };
+  findOwner = owner;
+  store.set({
+    terminalFind: {
+      seq: target.seq,
+      token,
+      query: "",
+      status: "idle",
+      bufferType: target.rec.term.buffer.active.type,
+    },
+  });
+}
+
+export function updateTerminalFindQuery(query: string) {
+  const owner = findOwner;
+  const current = store.get().terminalFind;
+  if (!owner || !ownsFind(owner) || current?.token !== owner.token) return;
+  owner.search.reset();
+  if (ownsFind(owner) && store.get().terminalFind === current) {
+    store.set({ terminalFind: { ...current, query, status: "idle" } });
+  }
+}
+
+export function navigateTerminalFind(direction: 1 | -1) {
+  const owner = findOwner;
+  const current = store.get().terminalFind;
+  if (!owner || !ownsFind(owner) || current?.token !== owner.token || !current.query.length) return;
+  const found = owner.search.find(current.query, direction);
+  if (ownsFind(owner) && store.get().terminalFind === current) {
+    store.set({ terminalFind: { ...current, status: found ? "found" : "missing" } });
+  }
+}
+
+export function closeTerminalFind(restoreFocus = true) {
+  const owner = findOwner;
+  if (!owner) return;
+  const shouldFocus = restoreFocus && ownsFind(owner);
+  findOwner = undefined;
+  owner.search.dispose();
+  if (store.get().terminalFind?.token === owner.token) store.set({ terminalFind: null });
+  // A synchronous store observer may switch projects or open another surface.
+  const target = findTarget();
+  const state = store.get();
+  if (
+    shouldFocus &&
+    !findOwner &&
+    target?.rec === owner.rec &&
+    target.root === owner.root &&
+    !state.paletteOpen &&
+    !state.quickOpen &&
+    !state.confirm
+  )
+    owner.rec.term.focus();
+}
+
 let themeWired = false;
 const launchSinks = new Map<string, (event: PtyEvent) => void>();
 let eventsReady: Promise<void> | undefined;
@@ -165,6 +297,7 @@ function markExited(ptyId: number, code: number | null) {
  *  it happens on first attach, when the host has real dimensions. */
 function ensureRec(session: TerminalSession): TermRec {
   wireTheme();
+  wireFind();
   const existing = terms.get(session.seq);
   if (existing) return existing;
 
@@ -338,13 +471,16 @@ export function attachTerm(session: TerminalSession, host: HTMLElement) {
   } else {
     rec.term.open(host);
   }
+  syncFindTarget();
   void spawnPty(session, rec);
 }
 
 /** Detach the DOM element — the PTY and scrollback stay alive. */
 export function detachTerm(seq: number) {
   const rec = terms.get(seq);
+  if (findOwner?.rec === rec) closeTerminalFind(false);
   rec?.term.element?.remove();
+  syncFindTarget();
 }
 
 /** Fit to the host's current size and inform the PTY. */
@@ -366,7 +502,9 @@ export function fitTerm(seq: number) {
 export function disposeTerm(seq: number) {
   const rec = terms.get(seq);
   if (!rec) return;
+  if (findOwner?.rec === rec) closeTerminalFind(false);
   terms.delete(seq);
+  syncFindTarget();
   rec.stopEvents?.();
   rec.stopEvents = null;
   for (const d of rec.disposers) {

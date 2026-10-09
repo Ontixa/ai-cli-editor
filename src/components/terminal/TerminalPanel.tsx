@@ -11,6 +11,8 @@ import {
 } from "../../state/actions";
 import { TerminalView } from "./TerminalView";
 import { ErrorBoundary } from "../ErrorBoundary";
+import { openTerminalFind } from "../../lib/terminal-manager";
+import { TerminalFindBar } from "./TerminalFindBar";
 
 export function TerminalPanel() {
   const terminals = useStore(store, (s) => s.terminals, shallow);
@@ -19,6 +21,7 @@ export function TerminalPanel() {
   const height = useStore(store, (s) => s.terminalHeight);
   const agents = useStore(store, (s) => s.agents, shallow);
   const workspace = useStore(store, (s) => s.workspace);
+  const findTarget = useStore(store, (s) => s.terminalFindTarget);
 
   if (!visible) return null;
 
@@ -96,10 +99,20 @@ export function TerminalPanel() {
             ↻
           </button>
         </div>
+        <button
+          className="icon-btn"
+          aria-label="Find in terminal"
+          title="Find in terminal (also in Command Palette)"
+          disabled={findTarget === null}
+          onClick={openTerminalFind}
+        >
+          Find
+        </button>
         <button className="icon-btn" title="Hide terminal" onClick={toggleTerminal}>
           ▾
         </button>
       </header>
+      <TerminalFindBar />
       <div className="terminal-body">
         <ErrorBoundary name="Terminal">
           {terminals.length === 0 && (
