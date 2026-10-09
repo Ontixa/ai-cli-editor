@@ -19,7 +19,8 @@
     "fmt": "prettier --write .",
     "fmt:check": "prettier --check .",
     "check": "npm run fmt:check && npm run lint && npm run typecheck && npm run test",
-    "test:browser:terminal-find": "playwright test --config tests/browser/playwright.config.ts"
+    "test:browser:terminal-find": "playwright test --config tests/browser/playwright.config.ts",
+    "test:browser:editor-rename": "playwright test --config tests/browser/editor-rename/playwright.config.ts"
   },
   "dependencies": {
     "@codemirror/language": "^6.10.2",
