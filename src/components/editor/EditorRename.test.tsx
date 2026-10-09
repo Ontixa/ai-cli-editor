@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { redo, undo, undoDepth } from "@codemirror/commands";
 import { language } from "@codemirror/language";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../../lib/ipc";
 import { editorManager } from "../../lib/editor-manager";
 import { initialState, store, type ProjectSnapshot } from "../../state/app";
@@ -45,6 +45,27 @@ let host: HTMLDivElement;
 let backendRoot: string;
 let disk: Map<string, string>;
 const diskKey = (project: string, path: string) => `${project}\0${path}`;
+const rangeRects = Object.getOwnPropertyDescriptor(window.Range.prototype, "getClientRects");
+const rangeBounds = Object.getOwnPropertyDescriptor(
+  window.Range.prototype,
+  "getBoundingClientRect",
+);
+
+beforeAll(() => {
+  // jsdom has no layout. Let CodeMirror's asynchronous measurement run using
+  // empty geometry; actual selection/scroll layout is checked in Chromium.
+  Object.defineProperties(window.Range.prototype, {
+    getClientRects: { configurable: true, value: () => [] },
+    getBoundingClientRect: { configurable: true, value: () => new window.DOMRect() },
+  });
+});
+afterAll(() => {
+  if (rangeRects) Object.defineProperty(window.Range.prototype, "getClientRects", rangeRects);
+  else Reflect.deleteProperty(window.Range.prototype, "getClientRects");
+  if (rangeBounds)
+    Object.defineProperty(window.Range.prototype, "getBoundingClientRect", rangeBounds);
+  else Reflect.deleteProperty(window.Range.prototype, "getBoundingClientRect");
+});
 
 function snapshot(project: string): ProjectSnapshot {
   return {
@@ -156,6 +177,7 @@ describe("file rename preserves the editor document", () => {
   it("retains unsaved text, selection and history with exactly one mounted view", async () => {
     const before = await edit();
     before.dispatch({ selection: { anchor: 2, head: 8 } });
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
     await rename();
 
     const view = editorManager.view("/a", "renamed.txt")!;

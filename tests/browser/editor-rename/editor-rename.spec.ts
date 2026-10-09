@@ -323,7 +323,28 @@ test("a read-only file stays read-only after rename and never becomes dirty from
   await deliverRename(page);
   await expectCurrent(page, "renamed.txt", originalText);
   await expect(editor(page)).toHaveAttribute("contenteditable", "false");
-  await editor(page).focus();
+  // Read-only content is not programmatically focusable. Use the real pointer
+  // selection path, which also blurs the previously clicked fixture control.
+  await editor(page).click({ position: { x: 30, y: 10 } });
+  await expect(
+    page.getByRole("button", { name: "Deliver rename watcher event", exact: true }),
+  ).not.toBeFocused();
+  await expect
+    .poll(() =>
+      editor(page).evaluate((element) =>
+        element.contains(window.getSelection()?.anchorNode ?? null),
+      ),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          document.activeElement === document.body ||
+          !!document.activeElement?.closest(".cm-editor"),
+      ),
+    )
+    .toBe(true);
   await page.keyboard.type("must not enter the document");
   expect((await state(page)).text).toBe(originalText);
   expect((await state(page)).docs["renamed.txt"]).toMatchObject({ editable: false, dirty: false });
